@@ -1,0 +1,76 @@
+# Task Persistence Schema — Draft v1
+
+PostgreSQL is the Task SSOT. This schema is a **design**, not an applied migration. Use SQLAlchemy models + Alembic migration and tests when implementing.
+
+```sql
+CREATE EXTENSION IF NOT EXISTS pgcrypto;
+
+CREATE TABLE tasks (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  owner_id TEXT NOT NULL,
+  request_id TEXT,
+  title TEXT NOT NULL,
+  description TEXT,
+  project TEXT,
+  status TEXT NOT NULL DEFAULT 'todo'
+    CHECK (status IN ('todo','in_progress','blocked','done','cancelled')),
+  priority TEXT NOT NULL DEFAULT 'medium'
+    CHECK (priority IN ('low','medium','high','urgent')),
+  due_date DATE,
+  due_at TIMESTAMPTZ,
+  scheduled_at TIMESTAMPTZ,
+  completed_at TIMESTAMPTZ,
+  estimated_minutes INTEGER CHECK (estimated_minutes IS NULL OR estimated_minutes > 0),
+  source TEXT NOT NULL DEFAULT 'natural_language',
+  version INTEGER NOT NULL DEFAULT 1,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  UNIQUE (owner_id, request_id)
+);
+
+CREATE TABLE task_events (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  task_id UUID NOT NULL REFERENCES tasks(id),
+  request_id TEXT,
+  event_type TEXT NOT NULL,
+  actor TEXT NOT NULL,
+  before_data JSONB,
+  after_data JSONB,
+  reason TEXT,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE TABLE task_field_evidence (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  task_id UUID NOT NULL REFERENCES tasks(id),
+  field_name TEXT NOT NULL,
+  field_value JSONB NOT NULL,
+  origin TEXT NOT NULL CHECK (origin IN ('explicit','inferred','default','external')),
+  source_reference TEXT,
+  explanation TEXT,
+  confirmed BOOLEAN NOT NULL DEFAULT FALSE,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE TABLE task_links (
+  parent_task_id UUID NOT NULL REFERENCES tasks(id),
+  child_task_id UUID NOT NULL REFERENCES tasks(id),
+  relation TEXT NOT NULL CHECK (relation IN ('subtask','blocks','related')),
+  PRIMARY KEY (parent_task_id, child_task_id, relation),
+  CHECK (parent_task_id <> child_task_id)
+);
+
+CREATE INDEX idx_tasks_owner_status_due ON tasks(owner_id,status,due_date);
+CREATE INDEX idx_task_events_task_created ON task_events(task_id,created_at DESC);
+```
+
+## Constraints and implementation details
+- `due_date` is date-only deadlines; `due_at` is precise timestamp. Do not fabricate 23:59.
+- `request_id` must come from authenticated request envelope, not LLM output. Unique per owner. For update/event operations, introduce an operation idempotency ledger if needed; `tasks.request_id` alone only protects creation.
+- Task mutation and audit event insert run in **one transaction**.
+- Use optimistic concurrency: `UPDATE ... WHERE id=:id AND version=:expected` and bump version. Return conflict on stale updates.
+- For all Task reads/writes constrain `owner_id` from auth context, never LLM-produced user IDs.
+- On completion set `completed_at`; on reopen clear it; keep events.
+- Validate no `task_links` dependency cycles in application/domain service.
+- Redact sensitive text from traces; avoid storing unrestricted raw chat content in `task_events`.
+- LangGraph checkpointer tables are managed by checkpointer library separately from domain Task tables.
