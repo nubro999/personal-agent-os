@@ -3,11 +3,11 @@
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.domain.tasks.service import list_pending_suggestions, list_tasks
-from app.persistence.models import Task, TrackerRun
+from app.persistence.models import ReplyDraft, Task, TrackerRun
 
 RECENT_FAILURE_WINDOW = timedelta(hours=24)
 NEW_TASK_WINDOW = timedelta(hours=24)
@@ -57,6 +57,14 @@ async def build_briefing(
     ]
     suggestions = await list_pending_suggestions(session, owner_id=owner_id)
     failed = await _failed_trackers(session, now)
+    drafts = (
+        await session.scalar(
+            select(func.count())
+            .select_from(ReplyDraft)
+            .where(ReplyDraft.owner_id == owner_id, ReplyDraft.status == "pending")
+        )
+        or 0
+    )
 
     sections: list[str] = []
 
@@ -73,13 +81,15 @@ async def build_briefing(
     new_lines = [_line(t) for t in new[:NEW_TASK_LIMIT]]
     if len(new) > NEW_TASK_LIMIT:
         new_lines.append(f"외 {len(new) - NEW_TASK_LIMIT}개")
+    if drafts:
+        sections.append(f"답변 초안 {drafts}개가 준비돼 있어요. 보드에서 볼 수 있어요.")
     add("새로 들어온 일", new_lines)
     add("수집기 문제", failed)
     sections.append(f"진행 중 {len(in_progress)}개, 고객 답 대기 {len(blocked)}개")
 
     summary = (
         f"마감 지남 {len(overdue)}, 오늘 마감 {len(due_today)}, "
-        f"끝난 것 같은 일 {len(suggestions)}, 새 일 {len(new)}"
+        f"끝난 것 같은 일 {len(suggestions)}, 답변 초안 {drafts}, 새 일 {len(new)}"
     )
     if failed:
         summary += f", 수집기 문제 {len(failed)}"

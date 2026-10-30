@@ -8,7 +8,8 @@ CS 번호가 없는 요청은 새 Task로 만들고, 나중에 내가 그 스레
 
 DM과 그룹 DM은 멘션이 없으니 내 마지막 메시지 뒤에 상대 메시지가 있으면 내 차례로 본다.
 답하지 않은 메시지 묶음의 첫 메시지를 기준으로 Task 하나를 만든다. 봇과 Slackbot은 건너뛴다.
-Slack에는 읽기만 하고 메시지를 보내지 않는다.
+Slack에는 읽기만 하고 메시지를 보내지 않는다. 내 차례인 요청에는 답변 초안을 만들어 두고,
+내가 답하면 초안을 치운다.
 
 실행: uv run python -m app.trackers.slack
 """
@@ -25,7 +26,7 @@ from zoneinfo import ZoneInfo
 
 import httpx
 from pydantic import BaseModel, ConfigDict, Field
-from sqlalchemy import select
+from sqlalchemy import func, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -43,8 +44,8 @@ from app.domain.tasks.service import (
 from app.llm.base import LLMError, StructuredLLM
 from app.llm.factory import get_llm
 from app.persistence.db import get_sessionmaker
-from app.persistence.models import ActivitySession, Task
-from app.trackers.prompts import SLACK_PROMPT
+from app.persistence.models import ActivitySession, ReplyDraft, Task
+from app.trackers.prompts import DRAFT_PROMPT, SLACK_PROMPT
 
 log = logging.getLogger(__name__)
 
@@ -52,6 +53,9 @@ SOURCE = "slack"
 CS_PATTERN = re.compile(r"CS-\d{7}")
 CONTEXT_MESSAGES = 6
 MESSAGE_TEXT_LIMIT = 300
+DRAFT_CONTEXT_MESSAGES = 12
+DRAFT_TEXT_LIMIT = 800
+STYLE_SAMPLE_COUNT = 30
 SEARCH_PAGES = 3
 
 
@@ -65,6 +69,8 @@ class SlackClient(Protocol):
     async def history(self, channel: str, oldest: float) -> list[dict[str, Any]]: ...
 
     async def user_name(self, user_id: str) -> str: ...
+
+    async def my_messages(self, user_id: str) -> list[str]: ...
 
 
 class HttpSlackClient:
@@ -133,6 +139,12 @@ class HttpSlackClient:
         name: str = profile.get("real_name") or data["user"].get("name") or user_id
         return name
 
+    async def my_messages(self, user_id: str) -> list[str]:
+        data = await self._get(
+            "search.messages", query=f"from:<@{user_id}>", count=60, sort="timestamp"
+        )
+        return [m.get("text") or "" for m in data["messages"]["matches"]]
+
     async def aclose(self) -> None:
         await self._http.aclose()
 
@@ -153,6 +165,7 @@ class ThreadState:
     pending: bool
     marker: str
     context: list[str] = field(default_factory=list)
+    draft_context: list[str] = field(default_factory=list)
     is_dm: bool = False
 
     @property
@@ -163,6 +176,16 @@ class ThreadState:
     def sync_id(self) -> str:
         # DM은 대화방 하나에 상태 하나다. 답하지 않은 묶음은 시간이 지나며 바뀐다.
         return f"{self.channel}:dm" if self.is_dm else f"{self.channel}:{self.thread_ts}"
+
+
+def _format_messages(messages: list[dict[str, Any]], me: str, count: int, limit: int) -> list[str]:
+    mention = f"<@{me}>"
+    return [
+        f"{'나' if m.get('user') == me else '상대'}: "
+        + re.sub(r"\s+", " ", (m.get("text") or "").replace(mention, "@나"))[:limit]
+        for m in messages[-count:]
+        if (m.get("text") or "").strip()
+    ]
 
 
 def analyze_thread(
@@ -181,12 +204,6 @@ def analyze_thread(
     )
     root_text = (messages[0].get("text") or "") if messages else ""
     found = CS_PATTERN.search(root_text)
-    context = [
-        f"{'나' if m.get('user') == me else '상대'}: "
-        + re.sub(r"\s+", " ", (m.get("text") or "").replace(mention, "@나"))[:MESSAGE_TEXT_LIMIT]
-        for m in messages[1:][-CONTEXT_MESSAGES:]
-        if (m.get("text") or "").strip()
-    ]
     return ThreadState(
         channel=channel,
         thread_ts=thread_ts,
@@ -194,7 +211,8 @@ def analyze_thread(
         cs_id=found.group(0) if found else None,
         pending=mention_last > my_last,
         marker=f"{max(my_last, mention_last):.6f}",
-        context=context,
+        context=_format_messages(messages[1:], me, CONTEXT_MESSAGES, MESSAGE_TEXT_LIMIT),
+        draft_context=_format_messages(messages[1:], me, DRAFT_CONTEXT_MESSAGES, DRAFT_TEXT_LIMIT),
     )
 
 
@@ -215,12 +233,6 @@ def analyze_dm(channel: str, messages: list[dict[str, Any]], me: str, partner: s
     latest = max((float(m["ts"]) for m in human), default=0.0)
     texts = " ".join(m.get("text") or "" for m in human)
     found = CS_PATTERN.search(texts)
-    context = [
-        f"{'나' if m['user'] == me else '상대'}: "
-        + re.sub(r"\s+", " ", m.get("text") or "")[:MESSAGE_TEXT_LIMIT]
-        for m in human[-CONTEXT_MESSAGES:]
-        if (m.get("text") or "").strip()
-    ]
     return ThreadState(
         channel=channel,
         thread_ts=unanswered[0]["ts"] if unanswered else f"{latest:.6f}",
@@ -228,7 +240,8 @@ def analyze_dm(channel: str, messages: list[dict[str, Any]], me: str, partner: s
         cs_id=found.group(0) if found else None,
         pending=bool(unanswered),
         marker=f"{latest:.6f}",
-        context=context,
+        context=_format_messages(human, me, CONTEXT_MESSAGES, MESSAGE_TEXT_LIMIT),
+        draft_context=_format_messages(human, me, DRAFT_CONTEXT_MESSAGES, DRAFT_TEXT_LIMIT),
         is_dm=True,
     )
 
@@ -250,6 +263,12 @@ class SlackTriage(BaseModel):
     threads: list[ThreadTriage] = Field(description="입력한 스레드마다 하나")
 
 
+class DraftOut(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    draft: str = Field(description="Slack에 보낼 답변 초안")
+
+
 def _triage_prompt(today: date, threads: dict[str, ThreadState]) -> str:
     lines = [*calendar_lines(today), ""]
     for ref, t in threads.items():
@@ -263,6 +282,55 @@ class SlackStats:
     created: int = 0
     started: int = 0
     suggested: int = 0
+    drafted: int = 0
+
+
+def style_samples(messages: list[str]) -> list[str]:
+    """내가 쓴 짧은 답변만 말투 샘플로 쓴다. 긴 공지나 붙여넣기는 말투가 아니다."""
+    samples: list[str] = []
+    for text in messages:
+        cleaned = re.sub(r"<@[A-Z0-9]+>", "", text).strip()
+        if 4 <= len(cleaned) <= 200 and "```" not in cleaned:
+            samples.append(re.sub(r"\s+", " ", cleaned))
+    return samples[:STYLE_SAMPLE_COUNT]
+
+
+def _draft_prompt(thread: ThreadState, task: Task, samples: list[str]) -> str:
+    lines = ["내 말투 샘플:", *(f"- {s}" for s in samples), "", f"연결된 할 일: {task.title}"]
+    lines.append(f"할 일 상태: {task.status}")
+    lines += ["", f"대화 ({thread.root_text}):", *thread.draft_context]
+    return "\n".join(lines)
+
+
+async def _save_draft(
+    session: AsyncSession, *, owner_id: str, thread: ThreadState, task: Task, draft: str
+) -> None:
+    fields = {"marker": thread.marker, "draft": draft, "status": "pending", "task_id": task.id}
+    await session.execute(
+        pg_insert(ReplyDraft)
+        .values(
+            owner_id=owner_id,
+            reference=thread.reference,
+            channel=thread.channel,
+            thread_ts=None if thread.is_dm else thread.thread_ts,
+            **fields,
+        )
+        .on_conflict_do_update(
+            index_elements=["owner_id", "reference"], set_=fields | {"updated_at": func.now()}
+        )
+    )
+
+
+async def _clear_drafts(session: AsyncSession, *, owner_id: str, thread: ThreadState) -> None:
+    """내가 답했으니 그 대화의 초안은 치운다."""
+    stmt = update(ReplyDraft).where(
+        ReplyDraft.owner_id == owner_id,
+        ReplyDraft.channel == thread.channel,
+        ReplyDraft.status == "pending",
+    )
+    if not thread.is_dm:
+        stmt = stmt.where(ReplyDraft.thread_ts == thread.thread_ts)
+    await session.execute(stmt.values(status="used", updated_at=func.now()))
 
 
 async def _cs_task(session: AsyncSession, owner_id: str, cs_id: str) -> Task | None:
@@ -282,8 +350,11 @@ async def _apply(
     thread: ThreadState,
     triage: ThreadTriage | None,
     stats: SlackStats,
-) -> None:
+) -> Task | None:
+    """초안을 만들 Task를 돌려준다. 내 일이 아니거나 내 차례가 아니면 None."""
     reference = thread.reference
+    if not thread.pending:
+        await _clear_drafts(session, owner_id=owner_id, thread=thread)
     if thread.is_dm and not thread.pending:
         # 내가 답했다. 이 대화방에서 만든 열린 Task마다 끝났는지 묻는다.
         tasks = await session.scalars(
@@ -303,7 +374,7 @@ async def _apply(
                 source_reference=f"{reference}:{thread.marker}",
                 explanation="DM에 답했어요",
             )
-        return
+        return None
     own = await session.scalar(
         select(Task).where(Task.owner_id == owner_id, Task.request_id == reference)
     )
@@ -318,16 +389,16 @@ async def _apply(
                 source_reference=f"{reference}:{thread.marker}",
                 explanation="Slack 스레드에 답했어요",
             )
-        return
+        return None
     if triage is None or triage.kind == "fyi":
-        return
+        return None
 
     linked = own or (await _cs_task(session, owner_id, thread.cs_id) if thread.cs_id else None)
     if linked is None and thread.cs_id:
-        return
+        return None
     if linked is not None:
         if linked.status in ("done", "cancelled"):
-            return
+            return None
         if triage.kind == "done_report":
             stats.suggested += await suggest_completion(
                 session,
@@ -355,7 +426,7 @@ async def _apply(
                 stats.started += 1
             except VersionConflict:
                 pass
-        return
+        return linked if triage.kind == "request" else None
 
     if triage.kind == "request" and triage.title:
         result = await create_task(
@@ -379,6 +450,34 @@ async def _apply(
             ),
         )
         stats.created += result.created
+        return result.task
+    return None
+
+
+async def _write_drafts(
+    client: SlackClient,
+    llm: StructuredLLM,
+    *,
+    owner_id: str,
+    wanted: list[tuple[ThreadState, Task]],
+    stats: SlackStats,
+) -> None:
+    settings = get_settings()
+    samples = style_samples(await client.my_messages(settings.slack_user_id))
+    for thread, task in wanted[: settings.slack_draft_limit]:
+        try:
+            result = await llm.generate(
+                system=DRAFT_PROMPT, prompt=_draft_prompt(thread, task, samples), output=DraftOut
+            )
+        except LLMError as exc:
+            # 초안은 없어도 Task는 남는다. 다음 메시지가 오면 다시 만든다.
+            log.warning("slack draft failed: %s", exc)
+            continue
+        async with get_sessionmaker().begin() as session:
+            await _save_draft(
+                session, owner_id=owner_id, thread=thread, task=task, draft=result.draft.strip()
+            )
+        stats.drafted += 1
 
 
 async def run(client: SlackClient, llm: StructuredLLM, now: datetime | None = None) -> SlackStats:
@@ -460,16 +559,19 @@ async def run(client: SlackClient, llm: StructuredLLM, now: datetime | None = No
         }
     ref_of = {id(t): ref for ref, t in pending.items()}
 
+    wanted: list[tuple[ThreadState, Task]] = []
     for thread in threads:
         stats.threads += 1
         async with get_sessionmaker().begin() as session:
-            await _apply(
+            task = await _apply(
                 session,
                 owner_id=owner_id,
                 thread=thread,
                 triage=triage.get(ref_of.get(id(thread), "")),
                 stats=stats,
             )
+            if task is not None:
+                wanted.append((thread, task))
             await session.execute(
                 pg_insert(ActivitySession)
                 .values(
@@ -483,6 +585,8 @@ async def run(client: SlackClient, llm: StructuredLLM, now: datetime | None = No
                     set_={"summary": thread.marker, "updated_at": now},
                 )
             )
+    if wanted:
+        await _write_drafts(client, llm, owner_id=owner_id, wanted=wanted, stats=stats)
     return stats
 
 
@@ -512,11 +616,12 @@ async def run_once() -> str | None:
     finally:
         await client.aclose()
     log.info(
-        "slack tracker: threads=%d created=%d started=%d suggested=%d",
+        "slack tracker: threads=%d created=%d started=%d suggested=%d drafted=%d",
         stats.threads,
         stats.created,
         stats.started,
         stats.suggested,
+        stats.drafted,
     )
     return None
 

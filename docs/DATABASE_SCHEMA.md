@@ -8,6 +8,8 @@ PostgreSQL is the Task SSOT.
 - `updated_at`은 DB trigger 없이 ORM `onupdate`로 갱신한다. Core `UPDATE`를 직접 쓸 때는 값을 같이 넣어야 한다.
 - migration `0002`로 설계에 없던 테이블 두 개를 더했다.
   - `task_suggestions`: 수집기가 낸 완료 제안. `(task_id, kind, source_reference)` unique, status는 pending, accepted, dismissed.
+  - `reply_drafts`(0004): Slack 답변 초안. `(owner_id, reference)` unique, status는 pending, used, dismissed.
+  - `tracker_runs`(0003): 수집기 실행 결과. 브리핑의 실패 표시용, 14일 보관.
   - `activity_sessions`: 수집기가 세션을 어디까지 읽었는지(`processed_lines`)와 세션 요약. `(owner_id, source, external_id)` unique. 원문은 저장하지 않는다.
 
 ```sql

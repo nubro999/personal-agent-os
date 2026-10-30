@@ -20,6 +20,7 @@ from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.domain.tasks.values import (
+    DRAFT_STATUSES,
     FIELD_ORIGINS,
     LINK_RELATIONS,
     SUGGESTION_KINDS,
@@ -145,6 +146,30 @@ class TaskSuggestion(Base):
     status: Mapped[str] = mapped_column(Text, nullable=False, server_default="pending")
     created_at: Mapped[datetime] = _created_at()
     decided_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class ReplyDraft(Base):
+    """Slack 답변 초안. 전송하지 않는다. 사용자가 복사해서 직접 보낸다."""
+
+    __tablename__ = "reply_drafts"
+    __table_args__ = (
+        CheckConstraint(_in_list("status", DRAFT_STATUSES), name="status"),
+        UniqueConstraint("owner_id", "reference"),
+    )
+
+    id: Mapped[uuid.UUID] = _uuid_pk()
+    owner_id: Mapped[str] = mapped_column(Text, nullable=False)
+    reference: Mapped[str] = mapped_column(Text, nullable=False)
+    channel: Mapped[str] = mapped_column(Text, nullable=False)
+    thread_ts: Mapped[str | None] = mapped_column(Text)
+    task_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("tasks.id"))
+    marker: Mapped[str] = mapped_column(Text, nullable=False)
+    draft: Mapped[str] = mapped_column(Text, nullable=False)
+    status: Mapped[str] = mapped_column(Text, nullable=False, server_default="pending")
+    created_at: Mapped[datetime] = _created_at()
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now()
+    )
 
 
 class TrackerRun(Base):

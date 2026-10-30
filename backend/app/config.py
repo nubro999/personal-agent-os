@@ -30,6 +30,9 @@ class Settings(BaseSettings):
     slack_token_file: Path = Path("~/.config/genlab-overmind/secrets.json")
     slack_token_key: str = "SLACK_MY_TOKEN"
     slack_lookback_days: int = 3
+    slack_team_id: str = "T05NS1KHKUH"
+    # 한 번 실행에 만드는 답변 초안 수. Claude 호출 수를 묶어 둔다.
+    slack_draft_limit: int = 5
     briefing_dir: Path = Path("~/.local/state/personal-agent-os/briefings")
     toast_script: str = (
         r"\\wsl.localhost\Ubuntu\home\nubroo\projects\personal-agent-os"

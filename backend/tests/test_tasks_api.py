@@ -9,7 +9,7 @@ from sqlalchemy import delete, select
 from app.config import get_settings
 from app.domain.tasks.service import Evidence, NewTask, create_task, suggest_completion
 from app.persistence.db import get_sessionmaker
-from app.persistence.models import Task, TaskEvent, TaskFieldEvidence, TaskSuggestion
+from app.persistence.models import ReplyDraft, Task, TaskEvent, TaskFieldEvidence, TaskSuggestion
 
 
 @pytest.fixture
@@ -23,6 +23,7 @@ def owner(monkeypatch: pytest.MonkeyPatch) -> Iterator[str]:
 async def cleanup(owner: str) -> Any:
     yield
     async with get_sessionmaker().begin() as session:
+        await session.execute(delete(ReplyDraft).where(ReplyDraft.owner_id == owner))
         ids = select(Task.id).where(Task.owner_id == owner).scalar_subquery()
         for model in (TaskSuggestion, TaskFieldEvidence, TaskEvent):
             await session.execute(delete(model).where(model.task_id.in_(ids)))
@@ -98,3 +99,27 @@ async def test_serves_app_page_and_manifest(client: AsyncClient) -> None:
 
     assert page.status_code == 200 and "<title>Personal OS</title>" in page.text
     assert manifest.json()["start_url"] == "/"
+
+
+async def test_lists_and_dismisses_drafts(client: AsyncClient, owner: str) -> None:
+    task_id = await _seed(owner)
+    async with get_sessionmaker().begin() as session:
+        session.add(
+            ReplyDraft(
+                owner_id=owner,
+                reference="slack:C1:1.0",
+                channel="C1",
+                thread_ts="1.0",
+                task_id=task_id,
+                marker="2.0",
+                draft="넵 확인하겠습니다",
+            )
+        )
+
+    [draft] = (await client.get("/api/drafts")).json()
+
+    assert (draft["task_title"], draft["draft"]) == ("보고서", "넵 확인하겠습니다")
+    assert draft["slack_url"].endswith("/C1/thread/C1-1.0")
+    assert (await client.post(f"/api/drafts/{draft['id']}/dismiss")).status_code == 200
+    assert (await client.get("/api/drafts")).json() == []
+    assert (await client.post(f"/api/drafts/{uuid.uuid4()}/dismiss")).status_code == 404

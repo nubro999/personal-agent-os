@@ -13,13 +13,21 @@ from app.llm.base import M
 from app.persistence.db import get_sessionmaker
 from app.persistence.models import (
     ActivitySession,
+    ReplyDraft,
     Task,
     TaskEvent,
     TaskFieldEvidence,
     TaskSuggestion,
 )
 from app.trackers import slack
-from app.trackers.slack import SlackTriage, ThreadTriage, analyze_dm, analyze_thread, thread_key
+from app.trackers.slack import (
+    DraftOut,
+    SlackTriage,
+    ThreadTriage,
+    analyze_dm,
+    analyze_thread,
+    thread_key,
+)
 
 ME = "UME"
 NOW = datetime(2026, 10, 30, 12, 0, tzinfo=ZoneInfo("Asia/Seoul"))
@@ -73,6 +81,9 @@ class FakeSlack:
     async def user_name(self, user_id: str) -> str:
         return "김재서"
 
+    async def my_messages(self, user_id: str) -> list[str]:
+        return ["<@U9> 수정완료했습니다", "넵 확인하겠습니다", "ok", "긴글" * 200]
+
     async def search_mentions(self, user_id: str, after: date) -> list[dict[str, Any]]:
         return [
             {"channel": {"id": ch}, "ts": msgs[-1]["ts"], "permalink": f"x?thread_ts={ts}"}
@@ -90,6 +101,8 @@ class FakeLLM:
 
     async def generate(self, *, system: str, prompt: str, output: type[M]) -> M:
         self.prompts.append(prompt)
+        if output is DraftOut:
+            return DraftOut(draft="넵 확인하겠습니다")  # type: ignore[return-value]
         return SlackTriage(threads=self.triage)  # type: ignore[return-value]
 
 
@@ -118,6 +131,7 @@ async def cleanup(owner: str) -> Any:
     yield
     async with get_sessionmaker().begin() as session:
         ids = select(Task.id).where(Task.owner_id == owner).scalar_subquery()
+        await session.execute(delete(ReplyDraft).where(ReplyDraft.owner_id == owner))
         for model in (TaskSuggestion, TaskFieldEvidence, TaskEvent):
             await session.execute(delete(model).where(model.task_id.in_(ids)))
         await session.execute(delete(Task).where(Task.owner_id == owner))
@@ -288,3 +302,78 @@ async def test_repeat_ping_keeps_slack_task_todo(owner: str) -> None:
     await slack.run(client, FakeLLM(triage()), now=NOW)
 
     assert await _tasks(owner) == {"쿠폰 안내 확인": "todo"}
+
+
+async def _drafts(owner: str) -> list[tuple[str, str]]:
+    async with get_sessionmaker()() as session:
+        rows = await session.scalars(select(ReplyDraft).where(ReplyDraft.owner_id == owner))
+        return [(d.draft, d.status) for d in rows]
+
+
+def test_style_samples_keep_short_replies_only() -> None:
+    samples = slack.style_samples(["<@U9> 수정완료했습니다", "ok", "x" * 300, "```code```"])
+
+    assert samples == ["수정완료했습니다"]
+
+
+async def test_request_gets_a_draft_and_my_reply_clears_it(owner: str) -> None:
+    thread = [msg("1.0", "U2", f"<@{ME}> 쿠폰 안내 확인해 주세요")]
+    client = FakeSlack({("C1", "1.0"): thread})
+    llm = FakeLLM(triage())
+
+    stats = await slack.run(client, llm, now=NOW)
+
+    assert stats.drafted == 1
+    assert await _drafts(owner) == [("넵 확인하겠습니다", "pending")]
+    assert "내 말투 샘플:\n- 수정완료했습니다" in llm.prompts[-1]
+    assert "연결된 할 일: 쿠폰 안내 확인" in llm.prompts[-1]
+
+    thread.append(msg("2.0", ME, "확인했습니다"))
+    await slack.run(client, FakeLLM(), now=NOW)
+
+    assert await _drafts(owner) == [("넵 확인하겠습니다", "used")]
+
+
+async def test_no_draft_for_fyi_or_someone_elses_cs_thread(owner: str) -> None:
+    client = FakeSlack(
+        {
+            ("C1", "1.0"): [msg("1.0", "U2", f"<@{ME}> 감사합니다")],
+            ("C2", "1.0"): [
+                msg("1.0", "BOT", "루미르 (CS-0004264)"),
+                msg("2.0", "U2", f"<@{ME}> 봐줘"),
+            ],
+        }
+    )
+    llm = FakeLLM(triage(kind="fyi", title=None), triage(ref="S2"))
+
+    stats = await slack.run(client, llm, now=NOW)
+
+    assert stats.drafted == 0
+    assert await _drafts(owner) == []
+
+
+async def test_cs_request_drafts_on_my_2325_task(owner: str) -> None:
+    await _seed(owner, "CS-0004260 쿠폰 문의")
+    client = FakeSlack(
+        {
+            ("C1", "1.0"): [
+                msg("1.0", "BOT", "x (CS-0004260)"),
+                msg("2.0", "U2", f"<@{ME}> 봐주세요"),
+            ]
+        }
+    )
+
+    stats = await slack.run(client, FakeLLM(triage()), now=NOW)
+
+    assert (stats.started, stats.drafted) == (1, 1)
+
+
+async def test_dm_reply_clears_draft(owner: str) -> None:
+    dm = [msg("1.0", "U2", "반품 정책 정리 부탁드려요")]
+    client = FakeSlack(dms={"D1": dm})
+    await slack.run(client, FakeLLM(triage()), now=NOW)
+
+    dm.append(msg("2.0", ME, "네"))
+    await slack.run(client, FakeLLM(), now=NOW)
+
+    assert await _drafts(owner) == [("넵 확인하겠습니다", "used")]

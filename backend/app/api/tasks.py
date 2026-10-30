@@ -6,6 +6,7 @@ from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
+from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import Settings, get_settings
@@ -21,7 +22,7 @@ from app.domain.tasks.service import (
 )
 from app.domain.tasks.values import TaskStatus
 from app.persistence.db import get_session
-from app.persistence.models import Task
+from app.persistence.models import ReplyDraft, Task
 
 router = APIRouter(prefix="/api")
 
@@ -61,6 +62,54 @@ class StatusChange(BaseModel):
     status: TaskStatus
     version: int
     request_id: str
+
+
+class DraftOut(BaseModel):
+    id: uuid.UUID
+    task_title: str | None
+    draft: str
+    slack_url: str
+
+
+def _slack_url(team: str, channel: str, thread_ts: str | None) -> str:
+    base = f"https://app.slack.com/client/{team}/{channel}"
+    return f"{base}/thread/{channel}-{thread_ts}" if thread_ts else base
+
+
+@router.get("/drafts")
+async def drafts(session: SessionDep, settings: SettingsDep) -> list[DraftOut]:
+    rows = await session.execute(
+        select(ReplyDraft, Task.title)
+        .outerjoin(Task, Task.id == ReplyDraft.task_id)
+        .where(ReplyDraft.owner_id == settings.owner_id, ReplyDraft.status == "pending")
+        .order_by(ReplyDraft.updated_at.desc())
+    )
+    return [
+        DraftOut(
+            id=draft.id,
+            task_title=title,
+            draft=draft.draft,
+            slack_url=_slack_url(settings.slack_team_id, draft.channel, draft.thread_ts),
+        )
+        for draft, title in rows.all()
+    ]
+
+
+@router.post("/drafts/{draft_id}/dismiss")
+async def dismiss_draft(
+    draft_id: uuid.UUID, session: SessionDep, settings: SettingsDep
+) -> dict[str, bool]:
+    async with session.begin():
+        result = await session.execute(
+            update(ReplyDraft)
+            .where(ReplyDraft.id == draft_id, ReplyDraft.owner_id == settings.owner_id)
+            .values(status="dismissed", updated_at=func.now())
+            .returning(ReplyDraft.id)
+        )
+        found = result.first() is not None
+    if not found:
+        raise HTTPException(404, "draft not found")
+    return {"dismissed": True}
 
 
 @router.get("/tasks")

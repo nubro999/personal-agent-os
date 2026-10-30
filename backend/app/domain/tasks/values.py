@@ -8,6 +8,7 @@ FIELD_ORIGINS: Final = ("explicit", "inferred", "default", "external")
 LINK_RELATIONS: Final = ("subtask", "blocks", "related")
 SUGGESTION_KINDS: Final = ("complete",)
 SUGGESTION_STATUSES: Final = ("pending", "accepted", "dismissed")
+DRAFT_STATUSES: Final = ("pending", "used", "dismissed")
 
 TaskStatus = Literal["todo", "in_progress", "blocked", "done", "cancelled"]
 Priority = Literal["low", "medium", "high", "urgent"]

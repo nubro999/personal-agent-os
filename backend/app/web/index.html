@@ -47,6 +47,11 @@ button {
 button:hover { border-color: var(--accent); color: var(--accent); }
 button:disabled { opacity: .5; cursor: default; }
 .empty { color: var(--muted); font-size: 13px; }
+.draft { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px; margin-bottom: 8px; }
+.draft .for { color: var(--muted); font-size: 12.5px; margin-bottom: 4px; overflow-wrap: anywhere; }
+.draft textarea { width: 100%; font: inherit; font-size: 14px; color: var(--text); background: var(--bg); border: 1px solid var(--line); border-radius: 6px; padding: 8px 10px; resize: vertical; }
+.draft .row { display: flex; gap: 6px; margin-top: 8px; align-items: center; }
+.draft a { font-size: 13px; color: var(--accent); }
 details > summary { cursor: pointer; }
 .chat { display: flex; flex-direction: column; min-height: 0; background: var(--panel); border-left: 1px solid var(--line); }
 .log { flex: 1; overflow-y: auto; padding: 18px 16px; }
@@ -146,6 +151,34 @@ function taskRow(task, today) {
   return row;
 }
 
+function draftCard(draft) {
+  const card = el("div", "draft");
+  card.append(el("div", "for", draft.task_title || "Slack 답변"));
+  const box = el("textarea");
+  box.rows = Math.min(6, draft.draft.split("\n").length + 1);
+  box.value = draft.draft;
+  box.setAttribute("aria-label", "답변 초안");
+  const row = el("div", "row");
+  const copy = el("button", "", "복사");
+  copy.addEventListener("click", async () => {
+    await navigator.clipboard.writeText(box.value);
+    copy.textContent = "복사했어요";
+  });
+  const open = el("a", "", "Slack에서 열기");
+  open.href = draft.slack_url;
+  open.target = "_blank";
+  open.rel = "noopener";
+  const drop = el("button", "", "버리기");
+  drop.addEventListener("click", async () => {
+    drop.disabled = true;
+    await post(`/api/drafts/${draft.id}/dismiss`);
+    await load();
+  });
+  row.append(copy, open, drop);
+  card.append(box, row);
+  return card;
+}
+
 function section(title, tasks, today, collapsed) {
   if (!tasks.length) return null;
   const wrap = el("section");
@@ -168,11 +201,19 @@ async function load() {
     const response = await fetch("/api/tasks");
     if (!response.ok) throw new Error(`목록을 불러오지 못했어요 (${response.status})`);
     const tasks = await response.json();
+    const draftResponse = await fetch("/api/drafts");
+    const drafts = draftResponse.ok ? await draftResponse.json() : [];
     const today = new Date(Date.now() + 9 * 3600e3).toISOString().slice(0, 10);
     const rest = tasks.filter((t) => !t.suggestion);
     const dueSoon = rest.filter((t) => t.due_date && t.due_date <= today);
     const others = rest.filter((t) => !dueSoon.includes(t));
+    let draftSection = null;
+    if (drafts.length) {
+      draftSection = el("section");
+      draftSection.append(el("h2", "", `답변 초안 ${drafts.length}`), ...drafts.map(draftCard));
+    }
     const groups = [
+      draftSection,
       section("끝난 것 같은 일", tasks.filter((t) => t.suggestion), today),
       section("오늘까지", dueSoon, today),
       section(STATUS.in_progress, others.filter((t) => t.status === "in_progress"), today),
@@ -252,7 +293,8 @@ $("input").addEventListener("keydown", (event) => {
 });
 
 load();
-setInterval(load, 60000);
+// 초안을 고치는 중에는 자동 새로고침으로 덮어쓰지 않는다.
+setInterval(() => { if (document.activeElement?.closest(".draft") == null) load(); }, 60000);
 </script>
 </body>
 </html>
