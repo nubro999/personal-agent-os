@@ -1,6 +1,11 @@
 # Task Persistence Schema — Draft v1
 
-PostgreSQL is the Task SSOT. This schema is a **design**, not an applied migration. Use SQLAlchemy models + Alembic migration and tests when implementing.
+PostgreSQL is the Task SSOT.
+
+**적용 상태 (2026-10-30):** 아래 4개 테이블과 인덱스는 `backend/app/persistence/models.py`와 migration `0001`로 구현됐다. 차이점:
+- `pgcrypto` 확장은 만들지 않는다. PostgreSQL 13부터 `gen_random_uuid()`가 기본 내장이고 로컬은 17을 쓴다.
+- 제약 이름은 naming convention을 따른다 (`ck_tasks_status`, `uq_tasks_owner_id_request_id` 등).
+- `updated_at`은 DB trigger 없이 ORM `onupdate`로 갱신한다. Core `UPDATE`를 직접 쓸 때는 값을 같이 넣어야 한다.
 
 ```sql
 CREATE EXTENSION IF NOT EXISTS pgcrypto;

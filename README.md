@@ -2,7 +2,7 @@
 
 개인 개발·운영 업무를 자연어로 관리하고, 필요한 회사 맥락을 조회하며, 검증된 자동화 작업을 승인 후 실행하는 개인 AI 업무 시스템.
 
-> 상태: **설계 확정 / 구현 전** (2026-10-29). 이 저장소의 문서는 개발 인수인계용이며 실행 가능한 제품을 의미하지 않습니다.
+> 상태: **구현 1단계** (2026-10-30). 로컬 Postgres, backend 뼈대, Task 테이블 migration, health API까지 있다. Task CRUD, LangGraph, UI는 아직 없다. 진행 상황은 [구현 계획](docs/IMPLEMENTATION_PLAN.md)을 본다.
 
 ## 결정된 방향
 
@@ -40,6 +40,24 @@
 2. [프로젝트 맥락](docs/PROJECT_CONTEXT.md)과 [아키텍처](docs/ARCHITECTURE.md)를 읽는다.
 3. [구현 계획](docs/IMPLEMENTATION_PLAN.md)의 첫 단계부터 구현한다.
 4. 회사 Overmind 연결은 초기 MVP에서 **모의 Adapter만** 두고 실데이터 접근은 별도 승인 및 환경 구성 후 연결한다.
+
+## 로컬 실행
+
+```bash
+# PostgreSQL (127.0.0.1:5433, 개발 DB pao, 테스트 DB pao_test)
+docker compose -f infra/docker-compose.yml up -d --wait
+
+cd backend
+uv sync
+uv run alembic upgrade head
+uv run uvicorn app.main:app --reload   # GET /health
+
+# 검사
+uv run ruff check . && uv run ruff format --check . && uv run mypy app tests migrations
+uv run pytest
+```
+
+테스트는 `pao_test` DB의 스키마를 매번 지우고 migration을 다시 적용한다. `_test`로 끝나지 않는 DB에서는 실행을 거부한다.
 
 ## 문서
 

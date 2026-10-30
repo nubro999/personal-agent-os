@@ -1,0 +1,26 @@
+# 로컬 개발용 PostgreSQL. 운영 배포용이 아니다.
+name: personal-agent-os
+
+services:
+  postgres:
+    image: postgres:17-alpine
+    # WSL이 켜지면 docker 서비스와 함께 다시 올라오게 한다.
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: pao
+      POSTGRES_PASSWORD: pao
+      POSTGRES_DB: pao
+    ports:
+      - "127.0.0.1:${POSTGRES_PORT:-5433}:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./postgres/init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      # 초기화 중 임시 서버는 unix socket만 열기 때문에 TCP로 확인해야 init이 끝난 뒤에 healthy가 된다.
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U pao -d pao"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+volumes:
+  pgdata:
