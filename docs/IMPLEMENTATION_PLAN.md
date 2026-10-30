@@ -64,7 +64,8 @@ AGENTS.md의 "First delivery"를 순서대로 쪼갠 것. 구현 순서는 DB sc
 
 ## 웹 화면 (2026-10-30)
 - upstream Agent Chat UI를 `frontend/`에 넣으려 했지만 외부 코드의 `pnpm install`이 권한 확인에서 막혔다. 외부 패키지 없는 단일 페이지로 바꿨다. `app/web/index.html` 하나다.
-- 브라우저 확장이 연결돼 있지 않아 실제 렌더링은 확인하지 못했다. JS 문법, API, CORS, Windows에서의 접속은 확인했다.
+- 화면과 버튼 동작은 사용자가 브라우저에서 확인했다 (2026-10-30).
+- 브리핑 알림은 일반 토스트가 눈에 띄지 않아 닫을 때까지 남는 reminder 방식으로 바꿨고, 사용자가 표시를 확인했다.
 
 ## 테스트로 확인하는 것 (1단계)
 - 같은 owner의 같은 `request_id`로 Task 두 개를 만들 수 없다. owner가 다르면 된다.
