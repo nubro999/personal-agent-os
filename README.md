@@ -2,7 +2,7 @@
 
 개인 개발·운영 업무를 자연어로 관리하고, 필요한 회사 맥락을 조회하며, 검증된 자동화 작업을 승인 후 실행하는 개인 AI 업무 시스템.
 
-> 상태: **개인용 동작 중** (2026-10-30). 채팅으로 Task 등록, 조회, 완료, 수정, 미루기, 취소, 다시 열기가 된다. Claude Code 세션 기록과 2325 담당 건을 30분마다 읽어 Task로 맞춘다. 진행 상황은 [구현 계획](docs/IMPLEMENTATION_PLAN.md)을 본다.
+> 상태: **개인용 동작 중** (2026-10-30). 채팅으로 Task 등록, 조회, 완료, 수정, 미루기, 취소, 다시 열기가 된다. 2325 담당 건, Slack 멘션, Claude Code 세션 기록을 30분마다 읽어 Task로 맞춘다. 진행 상황은 [구현 계획](docs/IMPLEMENTATION_PLAN.md)을 본다.
 
 ## 결정된 방향
 
@@ -71,7 +71,7 @@ infra/systemd/install.sh   # pao-agent(LangGraph 서버), pao-tracker.timer(30�
 - Postgres는 docker `restart: unless-stopped`, 에이전트와 수집기는 systemd 사용자 유닛으로 WSL이 켜지면 같이 뜬다.
 - Windows 로그인 때 WSL을 깨우고 계속 켜 두려면 Windows PowerShell에서 `infra/windows/register-wsl-autostart.ps1`을 한 번 실행한다.
 - 로그: `journalctl --user -u pao-agent -f`, `journalctl --user -u pao-tracker -n 50`
-- 수집기 수동 실행: `cd backend && uv run python -m app.trackers` (하나만: `app.trackers.maintenance`, `app.trackers.claude_code`)
+- 수집기 수동 실행: `cd backend && uv run python -m app.trackers` (하나만: `app.trackers.maintenance`, `app.trackers.slack`, `app.trackers.claude_code`)
 
 ## 업무 자동 트래킹 (Claude Code 세션)
 
@@ -88,6 +88,14 @@ infra/systemd/install.sh   # pao-agent(LangGraph 서버), pao-tracker.timer(30�
 - 처음에는 최근 30일 안에 접수된 열린 건만 Task로 만든다(`PAO_MAINT_LOOKBACK_DAYS`). 만든 Task는 2325 상태가 바뀔 때마다 따라간다.
 - 2325 쪽 상태가 그대로면 채팅으로 바꾼 상태를 되돌리지 않는다.
 - 2325 수집기가 먼저 돌아서 Claude Code 세션이 CS 번호로 2325 Task에 이어진다.
+
+## 업무 자동 트래킹 (Slack 멘션)
+
+공용 develop 계정 토큰(`SLACK_READ_TOKEN`, `~/.config/genlab-overmind/secrets.json`)으로 나(`PAO_SLACK_USER_ID`)를 멘션한 메시지를 최근 3일치 검색한다. develop이 들어간 채널만 보이고 DM은 안 보인다.
+- 스레드 단위로 본다. 나를 멘션한 마지막 메시지가 내 마지막 메시지보다 뒤면 내 차례다.
+- 내 차례인 스레드만 Claude가 요청, 해결 보고, 참고로 나눈다.
+- 루트에 CS 번호가 있으면 내 2325 Task에 잇는다. 요청이 왔는데 Task가 막힘이면 진행 중으로 바꾸고, 해결 보고면 완료 제안을 남긴다. 내 2325 Task가 없는 CS 스레드는 남의 담당이라 건너뛴다.
+- CS 번호가 없는 요청은 새 Task로 만들고, 내가 그 스레드에 답하면 완료 제안을 남긴다.
 
 채팅 UI는 https://agentchat.vercel.app 에서 Deployment URL `http://localhost:2024`, Assistant ID `task_agent`로 연결한다. LangSmith API Key는 비워 둔다.
 

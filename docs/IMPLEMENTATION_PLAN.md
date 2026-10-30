@@ -12,7 +12,7 @@ AGENTS.md의 "First delivery"를 순서대로 쪼갠 것. 구현 순서는 DB sc
 | 6 | 자동 실행: Postgres restart 정책, systemd 사용자 유닛(에이전트, 수집기 타이머), Windows 로그인 때 WSL 깨우기 | 완료 (Windows 작업은 스크립트만, 직접 실행 필요) |
 | 7 | 업무 자동 트래킹 1: Claude Code 세션 수집기 | 완료 (2026-10-30) |
 | 8 | 업무 자동 트래킹 2: 2325 수집기 | 완료 (2026-10-30) |
-| 9 | 업무 자동 트래킹 3: Slack 수집기 | 대기: 사용자 Slack ID 필요. 공용 develop 토큰은 develop 계정이 들어간 채널만 검색된다 |
+| 9 | 업무 자동 트래킹 3: Slack 수집기 | 완료 (2026-10-30). 공용 develop 토큰이라 develop이 들어간 채널만, DM 제외 |
 | 10 | Overmind Adapter (회사 지식 조회가 필요할 때) | 미착수 |
 
 ## 1단계에서 정한 것
@@ -48,6 +48,13 @@ AGENTS.md의 "First delivery"를 순서대로 쪼갠 것. 구현 순서는 DB sc
 - Task 하나가 2325 건 하나를 따라간다. `request_id = 2325:{item_key}`라 같은 건으로 Task가 두 번 생기지 않는다.
 - 마지막으로 본 2325 상태(`stage|status_group`)를 `activity_sessions.summary`에 둔다. 바뀐 건만 처리해서 849건 중 실제 쓰기는 변화가 있을 때뿐이다.
 - 수집기들은 `python -m app.trackers`로 한 이벤트 루프에서 차례로 돈다(async DB 엔진이 루프에 묶인다). 하나가 실패해도 나머지는 돈다.
+
+## Slack 수집기 (2026-10-30)
+- `app/trackers/slack.py`. `search.messages`로 멘션을 찾고 `conversations.replies`로 스레드 전체를 읽는다. 쓰기 API는 부르지 않는다.
+- 스레드마다 `max(내 마지막 ts, 나를 멘션한 마지막 ts)`를 `activity_sessions.summary`에 두고, 바뀐 스레드만 다시 본다. 이 스레드로 만든 열린 Task는 내가 답했는지 보러 매번 다시 읽는다.
+- 내 차례인 스레드는 한 번의 Claude 호출로 묶어서 분류한다.
+- 처음 돌렸을 때 CS 스레드 11개가 "리마인드 확인" 같은 제목으로 Task가 됐는데, 9개는 남의 담당이고 2개는 이미 배포완료였다. 그래서 내 2325 Task가 없는 CS 스레드는 건너뛰게 했다.
+- 수집기 순서: 2325, Slack, Claude Code. 앞에서 만든 Task를 뒤에서 CS 번호로 잇는다.
 
 ## 테스트로 확인하는 것 (1단계)
 - 같은 owner의 같은 `request_id`로 Task 두 개를 만들 수 없다. owner가 다르면 된다.

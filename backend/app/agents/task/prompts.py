@@ -39,14 +39,21 @@ def _week(monday: date) -> str:
     return ", ".join(f"{_WEEKDAYS[d.weekday()]} {d.isoformat()}" for d in days)
 
 
-def build_prompt(
-    today: date, transcript: list[tuple[str, str]], candidates: list[str] | None = None
-) -> str:
+def calendar_lines(today: date) -> list[str]:
+    """모델이 날짜를 계산하지 않고 고르게 하는 달력."""
     monday = today - timedelta(days=today.weekday())
-    lines = [
+    return [
         f"오늘: {today.isoformat()} ({_WEEKDAYS[today.weekday()]}요일)",
         f"이번 주: {_week(monday)}",
         f"다음 주: {_week(monday + timedelta(days=7))}",
+    ]
+
+
+def build_prompt(
+    today: date, transcript: list[tuple[str, str]], candidates: list[str] | None = None
+) -> str:
+    lines = [
+        *calendar_lines(today),
         "",
         "기존 Task:",
         *(candidates or ["(없음)"]),

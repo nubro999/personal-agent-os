@@ -23,8 +23,13 @@ class Settings(BaseSettings):
     maint_assignee_name: str = "신형섭"
     # 처음 가져올 때 이 기간 안에 접수된 열린 건만 Task로 만든다.
     maint_lookback_days: int = 30
+    # Slack. 공용 develop 계정 토큰이라 develop이 들어간 채널만 검색된다.
+    slack_user_id: str = "U0BD9BYJXB8"
+    slack_token_file: Path = Path("~/.config/genlab-overmind/secrets.json")
+    slack_token_key: str = "SLACK_READ_TOKEN"
+    slack_lookback_days: int = 3
 
-    @field_validator("claude_projects_dir", "maint_env_file", mode="after")
+    @field_validator("claude_projects_dir", "maint_env_file", "slack_token_file", mode="after")
     @classmethod
     def _expand_home(cls, value: Path) -> Path:
         return value.expanduser()

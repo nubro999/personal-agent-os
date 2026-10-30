@@ -9,14 +9,14 @@ import asyncio
 import logging
 
 from app.persistence.db import get_engine
-from app.trackers import claude_code, maintenance
+from app.trackers import claude_code, maintenance, slack
 
 log = logging.getLogger(__name__)
 
 
 async def run_all() -> None:
-    # 2325 건이 먼저 Task가 돼 있어야 Claude Code 세션을 CS 번호로 그 Task에 이을 수 있다.
-    for tracker in (maintenance, claude_code):
+    # 2325 건이 먼저 Task가 돼 있어야 Slack 스레드와 Claude Code 세션을 CS 번호로 이을 수 있다.
+    for tracker in (maintenance, slack, claude_code):
         try:
             await tracker.run_once()
         except Exception:
