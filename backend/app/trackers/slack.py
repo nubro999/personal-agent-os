@@ -493,7 +493,7 @@ def _load_token(path: Path, key: str) -> str:
     return token
 
 
-async def run_once() -> None:
+async def run_once() -> str | None:
     settings = get_settings()
     try:
         token = await asyncio.to_thread(
@@ -501,14 +501,14 @@ async def run_once() -> None:
         )
     except (OSError, KeyError, json.JSONDecodeError) as exc:
         log.warning("slack tracker skipped: %s", exc)
-        return
+        return f"Slack 토큰을 읽지 못함: {type(exc).__name__}"
     client = HttpSlackClient(token)
     try:
         stats = await run(client, get_llm())
     except (httpx.HTTPError, RuntimeError, LLMError) as exc:
         # 읽은 위치를 올리지 않았으니 다음 실행에서 다시 본다.
         log.warning("slack tracker failed: %s", exc)
-        return
+        return f"Slack 수집 실패: {exc}"
     finally:
         await client.aclose()
     log.info(
@@ -518,6 +518,7 @@ async def run_once() -> None:
         stats.started,
         stats.suggested,
     )
+    return None
 
 
 def main() -> None:

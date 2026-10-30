@@ -1,0 +1,10 @@
+[Unit]
+Description=Run Personal Agent OS briefing at noon
+
+[Timer]
+OnCalendar=*-*-* 12:00:00
+# PC가 꺼져 있었으면 켜졌을 때 한 번 띄운다.
+Persistent=true
+
+[Install]
+WantedBy=timers.target

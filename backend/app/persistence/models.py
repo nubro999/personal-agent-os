@@ -147,6 +147,19 @@ class TaskSuggestion(Base):
     decided_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
+class TrackerRun(Base):
+    """수집기 실행 기록. 실패를 브리핑에서 보여 주기 위한 것이다."""
+
+    __tablename__ = "tracker_runs"
+    __table_args__ = (Index("idx_tracker_runs_name_at", "name", "finished_at"),)
+
+    id: Mapped[uuid.UUID] = _uuid_pk()
+    name: Mapped[str] = mapped_column(Text, nullable=False)
+    ok: Mapped[bool] = mapped_column(nullable=False)
+    detail: Mapped[str | None] = mapped_column(Text)
+    finished_at: Mapped[datetime] = _created_at()
+
+
 class ActivitySession(Base):
     """수집기가 어디까지 읽었는지. 원문은 저장하지 않고 요약만 남긴다."""
 

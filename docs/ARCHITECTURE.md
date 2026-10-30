@@ -17,15 +17,16 @@ MVP에서 FastAPI는 Task CRUD와 인증된 실행/조회 엔드포인트를 제
 ## Modules
 ```text
 personal-agent-os/
-├── frontend/              # Agent Chat UI (upstream source)
 ├── backend/
-│   ├── app/api/           # FastAPI, health/task/approval routes
+│   ├── app/web/           # 보드와 채팅 단일 페이지
+│   ├── app/api/           # FastAPI, health/task/web routes
 │   ├── app/agents/task/   # LangGraph nodes, state, prompts
 │   ├── app/domain/tasks/  # Entity, validation, transition service
 │   ├── app/persistence/   # SQLAlchemy, Alembic, repositories
-│   ├── app/integrations/overmind/ # interface + fake
+│   ├── app/llm/           # LLM provider 인터페이스, Claude Agent SDK 구현
+│   ├── app/trackers/      # 2325, Slack, Claude Code 수집기, 정리
 │   └── tests/
-├── infra/                 # local postgres compose
+├── infra/                 # postgres compose, systemd, 2325 터널, 백업, Windows 스크립트
 └── docs/
 ```
 
@@ -36,7 +37,7 @@ personal-agent-os/
 | Task Domain Service | CRUD invariants, status transitions, idempotency, audit trail | prompting and model calls |
 | PostgreSQL | tasks, field evidence, task events, relationships, checkpoints | company-wide knowledge |
 | Overmind Adapter | authorized read of company context | personal Task source of truth |
-| Agent Chat UI | user interaction, thread display, interrupt response | direct DB writes |
+| 웹 페이지 (app/web) | 보드, 채팅, 완료와 제안 거절 | direct DB writes |
 | Temporal (future) | long-lived external workflows and retry orchestration | agent reasoning |
 
 ## Workflow design

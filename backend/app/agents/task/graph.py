@@ -16,6 +16,7 @@ from langgraph.graph import END, START, MessagesState, StateGraph
 from app.agents.task.prompts import SYSTEM_PROMPT, build_prompt
 from app.agents.task.schemas import MUTATIONS, TaskIntent
 from app.config import get_settings
+from app.domain.tasks.briefing import build_briefing
 from app.domain.tasks.service import (
     Evidence,
     NewTask,
@@ -23,6 +24,7 @@ from app.domain.tasks.service import (
     TaskNotFound,
     VersionConflict,
     create_task,
+    dismiss_suggestions,
     list_pending_suggestions,
     list_recent_candidates,
     list_tasks,
@@ -94,14 +96,21 @@ async def parse(state: TaskAgentState) -> dict[str, Any]:
         for m in state["messages"][-TRANSCRIPT_LIMIT:]
         if m.type in ("human", "ai")
     ]
+    owner_id = get_settings().owner_id
     async with get_sessionmaker()() as session:
-        candidates = await list_recent_candidates(session, owner_id=get_settings().owner_id)
+        candidates = await list_recent_candidates(session, owner_id=owner_id)
+        suggested = {t.id for _, t in await list_pending_suggestions(session, owner_id=owner_id)}
     refs = {f"T{i}": task for i, task in enumerate(candidates, 1)}
     try:
         intent = await get_llm().generate(
             system=SYSTEM_PROMPT,
             prompt=build_prompt(
-                _today(), transcript, [f"{ref}: {_describe(t)}" for ref, t in refs.items()]
+                _today(),
+                transcript,
+                [
+                    f"{ref}: {_describe(t)}" + (" / 완료 제안 있음" if t.id in suggested else "")
+                    for ref, t in refs.items()
+                ],
             ),
             output=TaskIntent,
         )
@@ -125,7 +134,9 @@ async def parse(state: TaskAgentState) -> dict[str, Any]:
     return {"intent": intent, "targets": targets}
 
 
-def route(state: TaskAgentState) -> Literal["create", "read", "mutate", "reply", "__end__"]:
+def route(
+    state: TaskAgentState,
+) -> Literal["create", "read", "brief", "mutate", "reply", "__end__"]:
     intent = state.get("intent")
     if intent is None:
         return "__end__"
@@ -133,6 +144,8 @@ def route(state: TaskAgentState) -> Literal["create", "read", "mutate", "reply",
         return "create" if (intent.title or "").strip() else "reply"
     if intent.action == "read":
         return "read"
+    if intent.action == "briefing":
+        return "brief"
     if intent.action in MUTATIONS and state["targets"] and not intent.ambiguous:
         return "mutate"
     return "reply"
@@ -196,6 +209,8 @@ async def read(state: TaskAgentState) -> dict[str, Any]:
             due_from=intent.due_from,
             due_to=intent.due_to,
             include_done=intent.include_done,
+            statuses=intent.statuses,
+            project=intent.project,
         )
         suggestions = await list_pending_suggestions(session, owner_id=owner_id)
     if tasks:
@@ -206,8 +221,22 @@ async def read(state: TaskAgentState) -> dict[str, Any]:
     if suggestions:
         # 수집기가 낸 완료 제안. "OO 끝났어"라고 하면 complete 경로로 정리된다.
         hints = [f"- {task.title}: {s.explanation or '근거 없음'}" for s, task in suggestions]
-        text += "\n\n끝난 것 같은 일이 있어요. 맞으면 끝났다고 말해 주세요.\n" + "\n".join(hints)
+        text += (
+            "\n\n끝난 것 같은 일이 있어요. 맞으면 끝났다고, 아니면 아니라고 말해 주세요.\n"
+            + "\n".join(hints)
+        )
     return {"messages": [AIMessage(text)]}
+
+
+async def brief(state: TaskAgentState) -> dict[str, Any]:
+    async with get_sessionmaker()() as session:
+        briefing = await build_briefing(
+            session,
+            owner_id=get_settings().owner_id,
+            today=_today(),
+            now=datetime.now(ZoneInfo(get_settings().timezone)),
+        )
+    return {"messages": [AIMessage(briefing.text)]}
 
 
 _DONE_VERB = {"complete": "완료 처리했어요", "cancel": "취소했어요", "reopen": "다시 열었어요"}
@@ -216,6 +245,17 @@ _DONE_VERB = {"complete": "완료 처리했어요", "cancel": "취소했어요",
 async def mutate(state: TaskAgentState, config: RunnableConfig) -> dict[str, Any]:
     intent = state["intent"]
     assert intent is not None
+    if intent.action == "dismiss":
+        async with get_sessionmaker().begin() as session:
+            total = 0
+            for target in state["targets"]:
+                total += await dismiss_suggestions(
+                    session, owner_id=get_settings().owner_id, task_id=uuid.UUID(target["id"])
+                )
+        labels = ", ".join(t["label"] for t in state["targets"])
+        text = f"제안을 내렸어요: {labels}" if total else f"내릴 제안이 없어요: {labels}"
+        return {"messages": [AIMessage(text)]}
+
     changes = _changes(intent)
     if changes == TaskChanges():
         return {"messages": [AIMessage("무엇을 바꿀지 알려 주세요.")]}
@@ -266,7 +306,7 @@ async def reply(state: TaskAgentState) -> dict[str, Any]:
     elif intent.action in ("clarify", "create"):
         text = intent.question or "어떤 일을 등록할까요?"
     else:
-        text = "할 일 등록, 조회, 완료, 수정, 미루기, 취소를 할 수 있어요."
+        text = "할 일 등록, 조회, 브리핑, 완료, 수정, 미루기, 취소를 할 수 있어요."
     return {"messages": [AIMessage(text)]}
 
 
@@ -275,11 +315,12 @@ def build_graph() -> Any:
     builder.add_node("parse", parse)
     builder.add_node("create", create)
     builder.add_node("read", read)
+    builder.add_node("brief", brief)
     builder.add_node("mutate", mutate)
     builder.add_node("reply", reply)
     builder.add_edge(START, "parse")
     builder.add_conditional_edges("parse", route)
-    for node in ("create", "read", "mutate", "reply"):
+    for node in ("create", "read", "brief", "mutate", "reply"):
         builder.add_edge(node, END)
     return builder.compile()
 

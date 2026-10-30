@@ -8,7 +8,7 @@ for unit in "$here"/*.service "$here"/*.timer; do
   [ -e "$unit" ] && install -m 644 "$unit" "$dest/"
 done
 systemctl --user daemon-reload
-systemctl --user enable --now pao-agent.service
+systemctl --user enable --now pao-agent.service pao-api.service pao-2325-tunnel.service
 for timer in "$here"/*.timer; do
   [ -e "$timer" ] && systemctl --user enable --now "$(basename "$timer")"
 done

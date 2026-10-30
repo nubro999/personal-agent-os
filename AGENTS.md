@@ -14,9 +14,9 @@
 - LangGraph 재시도 시 중복 Task 생성/상태 전이를 방지한다.
 
 ## Technology and layout
-- `frontend/`: upstream Agent Chat UI를 도입하고 가능한 한 작은 변경으로 유지.
+- `backend/app/web/`: 보드와 채팅이 한 화면에 있는 단일 페이지. FastAPI가 내주고 외부 패키지가 없다.
 - `backend/`: FastAPI, LangGraph, Pydantic, SQLAlchemy, Alembic, uv.
-- `infra/`: 로컬 PostgreSQL용 Docker Compose.
+- `infra/`: 로컬 PostgreSQL Docker Compose, systemd 유닛, 2325 터널, 백업, Windows 스크립트.
 - `docs/`: 설계 결정과 실제 구현 상태 기록.
 
 ## Engineering workflow
@@ -36,7 +36,8 @@
 - 중복 요청, 잘못된 Task 대상, 날짜 파싱, 질문 재개를 검증하는 테스트
 
 ## Known decisions
-- Task UI: **Agent Chat UI**. 커스텀 보드/Inbox는 후속.
+- Task UI: 자체 단일 페이지(http://localhost:8000). upstream Agent Chat UI 도입은 2026-10-30에 접었다. 그 코드의 npm 설치가 필요 없는 방식을 택했다.
+- 알림: Slack 봇은 보류. 브리핑은 채팅과 Windows 알림으로 전달한다.
 - LLM provider는 설정으로 교체 가능. 첫 provider는 Claude Agent SDK(개인 Claude Max 구독 로그인)이고 회사 업무 트래킹에도 쓴다. 혼자 쓰는 로컬 용도로만 쓰고, 다른 사람에게 제공하거나 클라우드에 배포하려면 API 키 provider로 바꾼다.
 - Temporal은 초기 의존성 아님.
 - 기본 타임존 `Asia/Seoul`.

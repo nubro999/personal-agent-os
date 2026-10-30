@@ -314,7 +314,7 @@ async def run(
     return stats
 
 
-async def run_once() -> None:
+async def run_once() -> str | None:
     stats = await run(get_settings().claude_projects_dir)
     log.info(
         "claude_code tracker: sessions=%d created=%d started=%d suggested=%d failed=%d",
@@ -324,6 +324,7 @@ async def run_once() -> None:
         stats.suggested,
         stats.failed,
     )
+    return f"세션 {stats.failed}개 분석 실패" if stats.failed else None
 
 
 def main() -> None:

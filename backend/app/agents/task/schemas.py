@@ -3,13 +3,22 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from app.domain.tasks.values import Priority
+from app.domain.tasks.values import Priority, TaskStatus
 
 Origin = Literal["explicit", "inferred"]
 Action = Literal[
-    "create", "read", "complete", "update", "cancel", "reopen", "clarify", "unsupported"
+    "create",
+    "read",
+    "briefing",
+    "complete",
+    "update",
+    "cancel",
+    "reopen",
+    "dismiss",
+    "clarify",
+    "unsupported",
 ]
-MUTATIONS: tuple[Action, ...] = ("complete", "update", "cancel", "reopen")
+MUTATIONS: tuple[Action, ...] = ("complete", "update", "cancel", "reopen", "dismiss")
 
 
 class TaskIntent(BaseModel):
@@ -20,12 +29,14 @@ class TaskIntent(BaseModel):
 
     action: Action
     target_refs: list[str] = Field(
-        description="complete/update/cancel/reopen: 대상 Task의 ref(T1 등). 후보가 여럿이면 모두"
+        description="complete/update/cancel/reopen/dismiss: 대상 Task의 ref. 후보가 여럿이면 모두"
     )
     ambiguous: bool = Field(description="대상을 하나로 정할 수 없으면 true")
     title: str | None = Field(description="create: 제목. update: 바꿀 제목")
     description: str | None
-    project: str | None = Field(description="create: 프로젝트. update: 바꿀 프로젝트")
+    project: str | None = Field(
+        description="create: 프로젝트. update: 바꿀 프로젝트. read: 이 프로젝트만 볼 때"
+    )
     project_origin: Origin | None
     priority: Priority | None = Field(description="create: 우선순위. update: 바꿀 우선순위")
     priority_origin: Origin | None
@@ -33,5 +44,6 @@ class TaskIntent(BaseModel):
     due_from: date | None = Field(description="read: 조회 기간 시작일")
     due_to: date | None = Field(description="read: 조회 기간 종료일")
     include_done: bool = Field(description="read: 완료된 Task도 포함할지")
+    statuses: list[TaskStatus] = Field(description="read: 이 상태만 볼 때. 아니면 빈 배열")
     question: str | None = Field(description="clarify: 사용자에게 물을 한 문장")
     reason: str = Field(description="판단 근거 한 문장")

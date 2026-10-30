@@ -2,11 +2,11 @@
 
 개인 개발·운영 업무를 자연어로 관리하고, 필요한 회사 맥락을 조회하며, 검증된 자동화 작업을 승인 후 실행하는 개인 AI 업무 시스템.
 
-> 상태: **개인용 동작 중** (2026-10-30). 채팅으로 Task 등록, 조회, 완료, 수정, 미루기, 취소, 다시 열기가 된다. 2325 담당 건, Slack 멘션과 DM, Claude Code 세션 기록을 30분마다 읽어 Task로 맞춘다. 진행 상황은 [구현 계획](docs/IMPLEMENTATION_PLAN.md)을 본다.
+> 상태: **개인용 동작 중** (2026-10-30). http://localhost:8000 에서 보드와 채팅을 쓴다. 2325 담당 건, Slack 멘션과 DM, Claude Code 세션 기록을 30분마다 읽어 Task로 맞추고, 낮 12시에 브리핑 알림을 띄운다. 진행 상황은 [구현 계획](docs/IMPLEMENTATION_PLAN.md)을 본다.
 
 ## 결정된 방향
 
-- **Frontend:** [LangChain Agent Chat UI](https://github.com/langchain-ai/agent-chat-ui) (Next.js)
+- **Frontend:** 보드와 채팅이 한 화면에 있는 단일 페이지 (FastAPI가 내줌, 외부 패키지 없음)
 - **Agent runtime:** Python + LangGraph
 - **API:** FastAPI
 - **Storage:** PostgreSQL, SQLAlchemy, Alembic
@@ -65,10 +65,16 @@ uv run pytest
 ## 자동 실행
 
 ```bash
-infra/systemd/install.sh   # pao-agent(LangGraph 서버), pao-tracker.timer(30분마다 수집기 전부) 등록
+infra/systemd/install.sh   # 아래 서비스와 타이머 전부 등록
 ```
 
-- Postgres는 docker `restart: unless-stopped`, 에이전트와 수집기는 systemd 사용자 유닛으로 WSL이 켜지면 같이 뜬다.
+- `pao-agent`: LangGraph 서버 (localhost:2024). 대화 기록은 `backend/.langgraph_api/`에 남는다.
+- `pao-api`: 보드 화면과 Task API (localhost:8000). 인증이 없어서 127.0.0.1에만 띄운다.
+- `pao-2325-tunnel`: 2325 DB 전용 터널 (127.0.0.1:13316). `run.sh`와 따로 돈다.
+- `pao-tracker.timer`: 30분마다 2325, Slack, Claude Code, 정리. 결과는 `tracker_runs`에 남고 실패는 브리핑에 나온다.
+- `pao-briefing.timer`: 낮 12시 브리핑 (`~/.local/state/personal-agent-os/briefings/`, Windows 알림). 시각을 바꾸려면 유닛의 `OnCalendar`를 고친다.
+- `pao-backup.timer`: 새벽 3시 `pg_dump`를 `Documents/personal-agent-os-backups`로, 14일 보관.
+- Postgres는 docker `restart: unless-stopped`로 WSL이 켜지면 같이 뜬다.
 - Windows 로그인 때 WSL을 깨우고 계속 켜 두려면 Windows PowerShell에서 `infra/windows/register-wsl-autostart.ps1`을 한 번 실행한다.
 - 로그: `journalctl --user -u pao-agent -f`, `journalctl --user -u pao-tracker -n 50`
 - 수집기 수동 실행: `cd backend && uv run python -m app.trackers` (하나만: `app.trackers.maintenance`, `app.trackers.slack`, `app.trackers.claude_code`)
@@ -83,7 +89,7 @@ infra/systemd/install.sh   # pao-agent(LangGraph 서버), pao-tracker.timer(30�
 
 ## 업무 자동 트래킹 (2325 담당 건)
 
-2325(maintenance_list) DB에서 담당자 `PAO_MAINT_ASSIGNEE_NAME`(기본 신형섭)으로 배정된 건을 읽는다. DB 접속 정보는 `PAO_MAINT_ENV_FILE`(기본 maintenance_list/.env)에서 실행할 때 읽고, 터널(`maintenance_list/run.sh`)이 꺼져 있으면 그 주기는 건너뛴다.
+2325(maintenance_list) DB에서 담당자 `PAO_MAINT_ASSIGNEE_NAME`(기본 신형섭)으로 배정된 건을 읽는다. DB 계정은 `PAO_MAINT_ENV_FILE`(기본 maintenance_list/.env)에서 실행할 때 읽고, 접속은 전용 터널로 해서 `run.sh`가 꺼져 있어도 된다. 터널이 끊겨 있으면 그 주기는 건너뛰고 브리핑에 표시한다.
 - 2325 단계가 기준이다: 수정중은 진행 중, 고객사 소통중은 막힘, 팀장 확인중과 배포완료는 완료, 반려는 취소. 단계가 없으면 ax 상태로 끝났는지만 본다.
 - 처음에는 최근 30일 안에 접수된 열린 건만 Task로 만든다(`PAO_MAINT_LOOKBACK_DAYS`). 만든 Task는 2325 상태가 바뀔 때마다 따라간다.
 - 2325 쪽 상태가 그대로면 채팅으로 바꾼 상태를 되돌리지 않는다.
@@ -98,7 +104,7 @@ infra/systemd/install.sh   # pao-agent(LangGraph 서버), pao-tracker.timer(30�
 - CS 번호가 없는 요청은 새 Task로 만들고, 내가 그 스레드에 답하면 완료 제안을 남긴다.
 - DM과 그룹 DM은 내 마지막 메시지 뒤에 상대 메시지가 있으면 내 차례로 본다. 답하지 않은 메시지 묶음 하나가 Task 하나다. 봇과 Slackbot은 건너뛰고, 잡담이나 공유만 있는 대화는 Task를 만들지 않는다.
 
-채팅 UI는 https://agentchat.vercel.app 에서 Deployment URL `http://localhost:2024`, Assistant ID `task_agent`로 연결한다. LangSmith API Key는 비워 둔다.
+화면은 http://localhost:8000 이다. 브라우저에서 "앱으로 설치"하면 따로 창으로 뜬다.
 
 LLM은 Claude Agent SDK로 로그인된 Claude Code 인증(개인 Claude Max 구독)을 쓴다. 혼자 쓰는 로컬 용도로만 쓴다. 사용량은 claude.ai, Claude Code와 같은 한도를 나눠 쓴다. 모델은 `PAO_LLM_MODEL`(기본 `claude-sonnet-5-5`).
 

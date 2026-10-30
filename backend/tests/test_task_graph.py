@@ -10,15 +10,21 @@ from sqlalchemy import delete, select
 from app.agents.task import graph as graph_module
 from app.agents.task.schemas import TaskIntent
 from app.config import get_settings
-from app.domain.tasks.service import Evidence, NewTask, create_task
+from app.domain.tasks.service import (
+    Evidence,
+    NewTask,
+    create_task,
+    list_pending_suggestions,
+    suggest_completion,
+)
 from app.llm.base import LLMError, M
 from app.persistence.db import get_sessionmaker
-from app.persistence.models import Task, TaskEvent, TaskFieldEvidence
+from app.persistence.models import Task, TaskEvent, TaskFieldEvidence, TaskSuggestion, TrackerRun
 
 
 def intent(**values: Any) -> TaskIntent:
     base: dict[str, Any] = dict.fromkeys(TaskIntent.model_fields)
-    base.update(include_done=False, reason="test", target_refs=[], ambiguous=False)
+    base.update(include_done=False, reason="test", target_refs=[], ambiguous=False, statuses=[])
     base.update(values)
     return TaskIntent(**base)
 
@@ -49,6 +55,7 @@ async def cleanup(owner: str) -> Any:
     yield
     async with get_sessionmaker().begin() as session:
         ids = select(Task.id).where(Task.owner_id == owner).scalar_subquery()
+        await session.execute(delete(TaskSuggestion).where(TaskSuggestion.task_id.in_(ids)))
         await session.execute(delete(TaskFieldEvidence).where(TaskFieldEvidence.task_id.in_(ids)))
         await session.execute(delete(TaskEvent).where(TaskEvent.task_id.in_(ids)))
         await session.execute(delete(Task).where(Task.owner_id == owner))
@@ -112,7 +119,7 @@ async def test_missing_due_date_is_not_invented(
 @pytest.mark.parametrize(
     ("result", "expected"),
     [
-        (intent(action="unsupported"), "할 일 등록, 조회, 완료"),
+        (intent(action="unsupported"), "할 일 등록, 조회, 브리핑"),
         (intent(action="complete"), "어떤 일인지 찾지 못했어요"),
         (intent(action="complete", target_refs=["T9"]), "어떤 일인지 찾지 못했어요"),
         (intent(action="clarify", question="어떤 일을 등록할까요?"), "어떤 일을 등록할까요?"),
@@ -216,3 +223,71 @@ async def test_closed_task_is_not_updated(monkeypatch: pytest.MonkeyPatch, owner
 
     use_llm(monkeypatch, intent(action="reopen", target_refs=["T1"]))
     assert (await run("보고서 다시 해야 해")).startswith("다시 열었어요: 보고서")
+
+
+async def test_read_filters_by_status_and_project(
+    monkeypatch: pytest.MonkeyPatch, owner: str
+) -> None:
+    await _seed(owner, "A 일", "B 일")
+    async with get_sessionmaker().begin() as session:
+        tasks = await session.scalars(select(Task).where(Task.owner_id == owner))
+        for task in tasks:
+            if task.title == "A 일":
+                task.status = "blocked"
+                task.project = "2325 반영기"
+
+    use_llm(monkeypatch, intent(action="read", statuses=["blocked"]))
+    assert (await run("막힌 것만")).startswith("할 일 1개예요.\n1. A 일")
+
+    use_llm(monkeypatch, intent(action="read", project="2325"))
+    assert (await run("2325 할 일")).startswith("할 일 1개예요.\n1. A 일")
+
+
+async def test_dismiss_removes_suggestion_but_keeps_task(
+    monkeypatch: pytest.MonkeyPatch, owner: str
+) -> None:
+    await _seed(owner, "보고서")
+    async with get_sessionmaker().begin() as session:
+        task = await session.scalar(select(Task).where(Task.owner_id == owner))
+        assert task is not None
+        await suggest_completion(
+            session,
+            owner_id=owner,
+            task_id=task.id,
+            source="slack",
+            source_reference="r",
+            explanation="보고함",
+        )
+    fake = use_llm(monkeypatch, intent(action="dismiss", target_refs=["T1"]))
+
+    reply = await run("보고서 아직 안 끝났어")
+
+    assert reply.startswith("제안을 내렸어요: 보고서")
+    assert "완료 제안 있음" in fake.prompts[0]
+    assert (await _statuses(owner))["보고서"][0] == "todo"
+    async with get_sessionmaker()() as session:
+        assert await list_pending_suggestions(session, owner_id=owner) == []
+
+
+async def test_briefing_lists_due_suggestions_and_failures(
+    monkeypatch: pytest.MonkeyPatch, owner: str
+) -> None:
+    today = graph_module._today()
+    async with get_sessionmaker().begin() as session:
+        for title, due in (("지난 일", date(2020, 1, 1)), ("오늘 일", today)):
+            await create_task(
+                session,
+                owner_id=owner,
+                request_id=title,
+                actor="t",
+                new=NewTask(title=Evidence(title, "explicit"), due_date=Evidence(due, "explicit")),
+            )
+        session.add(TrackerRun(name="test-slack", ok=False, detail="토큰 만료"))
+    use_llm(monkeypatch, intent(action="briefing"))
+
+    text = await run("브리핑")
+
+    assert "마감 지난 일\n- 지난 일" in text and "오늘 마감\n- 오늘 일" in text
+    assert "수집기 문제\n- test-slack: 토큰 만료" in text
+    async with get_sessionmaker().begin() as session:
+        await session.execute(delete(TrackerRun).where(TrackerRun.name == "test-slack"))

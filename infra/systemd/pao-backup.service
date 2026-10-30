@@ -1,0 +1,7 @@
+# Postgres 백업. pao-backup.timer가 매일 실행한다.
+[Unit]
+Description=Personal Agent OS database backup
+
+[Service]
+Type=oneshot
+ExecStart=%h/projects/personal-agent-os/infra/backup/pg-backup.sh

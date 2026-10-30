@@ -18,7 +18,9 @@ class Settings(BaseSettings):
     tracker_lookback_hours: int = 24
     # 마지막 활동 뒤 이만큼 조용한 세션만 읽는다. 진행 중인 대화를 반쯤 읽지 않기 위해서다.
     tracker_idle_minutes: int = 20
-    # 2325(maintenance_list). DB 접속 정보는 그 저장소의 .env를 실행할 때 읽는다.
+    # 2325(maintenance_list). 계정은 그 저장소의 .env를 실행할 때 읽고,
+    # 접속은 전용 터널(pao-2325-tunnel)로 한다. run.sh가 꺼져 있어도 된다.
+    maint_db_port: int = 13316
     maint_env_file: Path = Path("~/glab/glab_mt/maintenance_list/.env")
     maint_assignee_name: str = "신형섭"
     # 처음 가져올 때 이 기간 안에 접수된 열린 건만 Task로 만든다.
@@ -28,8 +30,16 @@ class Settings(BaseSettings):
     slack_token_file: Path = Path("~/.config/genlab-overmind/secrets.json")
     slack_token_key: str = "SLACK_MY_TOKEN"
     slack_lookback_days: int = 3
+    briefing_dir: Path = Path("~/.local/state/personal-agent-os/briefings")
+    toast_script: str = (
+        r"\\wsl.localhost\Ubuntu\home\nubroo\projects\personal-agent-os"
+        r"\infra\windows\toast.ps1"
+    )
+    powershell_path: str = "/mnt/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe"
 
-    @field_validator("claude_projects_dir", "maint_env_file", "slack_token_file", mode="after")
+    @field_validator(
+        "claude_projects_dir", "maint_env_file", "slack_token_file", "briefing_dir", mode="after"
+    )
     @classmethod
     def _expand_home(cls, value: Path) -> Path:
         return value.expanduser()

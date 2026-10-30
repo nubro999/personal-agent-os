@@ -6,14 +6,18 @@ AGENTS.md의 "First delivery"를 순서대로 쪼갠 것. 구현 순서는 DB sc
 |---|---|---|
 | 1 | 로컬 Postgres compose, backend uv 프로젝트, 설정, Task/TaskEvent/FieldEvidence/TaskLink 모델과 migration, health API | 완료 (2026-10-30) |
 | 2 | Task Domain Service: 생성(요청 멱등성), 조회, 수정(낙관적 동시성), 완료/재오픈, 이벤트와 근거를 한 트랜잭션에 기록 | 완료 (2026-10-30) |
-| 3 | Task CRUD API (FastAPI): owner_id는 인증 컨텍스트에서만, request_id는 요청 envelope에서만 | 미착수 |
+| 3 | Task API (FastAPI): 목록, 상태 변경, 제안 거절. owner는 설정값, request_id는 클라이언트 envelope | 완료 (2026-10-30). 인증은 없고 127.0.0.1 전용 |
 | 4 | LangGraph Task workflow: parse, extract, resolve, validate, clarify(`interrupt()`), persist/read. Postgres checkpointer | 동작: parse(대상 후보 포함), create, read, mutate, reply. 되묻기는 대화로 처리, `interrupt()`와 영속 checkpointer는 아직 |
-| 5 | Agent Chat UI 연결: LangGraph server와 FastAPI 라우팅 결정 후 문서화 | 데모: 호스팅 UI에서 `langgraph dev` 직접 연결 |
+| 5 | 화면 | 완료: 자체 단일 페이지(보드, 채팅). 페이지가 FastAPI(8000)와 LangGraph(2024)를 각각 부른다 |
 | 6 | 자동 실행: Postgres restart 정책, systemd 사용자 유닛(에이전트, 수집기 타이머), Windows 로그인 때 WSL 깨우기 | 완료 (Windows 작업은 스크립트만, 직접 실행 필요) |
 | 7 | 업무 자동 트래킹 1: Claude Code 세션 수집기 | 완료 (2026-10-30) |
 | 8 | 업무 자동 트래킹 2: 2325 수집기 | 완료 (2026-10-30) |
 | 9 | 업무 자동 트래킹 3: Slack 수집기 (멘션, DM, 그룹 DM) | 완료 (2026-10-30). 내 user token 사용 |
-| 10 | Overmind Adapter (회사 지식 조회가 필요할 때) | 미착수 |
+| 10 | 브리핑, 제안 거절, 조회 필터, 수집기 실패 표시, DB 백업, 2325 전용 터널 | 완료 (2026-10-30) |
+| 11 | 오래된 Task 정리, 출처 간 중복 제안 | 완료 (2026-10-30) |
+| 12 | Slack 봇 (브리핑 전달, Slack에서 대화) | 보류 |
+| 13 | Slack 답변 초안, 2325 개선 에이전트, Context Agent | 미착수 |
+| 14 | Overmind Adapter (회사 지식 조회가 필요할 때) | 미착수 |
 
 ## 1단계에서 정한 것
 - 로컬 DB 포트는 `5433` (다른 프로젝트 Postgres와 겹치지 않게). `POSTGRES_PORT`로 바꿀 수 있다.
@@ -27,7 +31,7 @@ AGENTS.md의 "First delivery"를 순서대로 쪼갠 것. 구현 순서는 DB sc
 - 날짜는 모델이 계산하지 않도록 이번 주, 다음 주 달력을 프롬프트에 넣는다. 요일만 말하면 오늘 포함 가장 가까운 그 요일.
 - 요청 멱등성: `request_id`는 LangGraph `run_id`. 같은 run이 재시도돼도 Task가 하나만 생긴다.
 - owner는 설정값 `PAO_OWNER_ID`(기본 `me`). 인증이 붙기 전까지 로컬 단일 사용자.
-- 아직 없는 것: `interrupt()` 되묻기, 영속 checkpointer(`langgraph dev`는 메모리 저장이라 서버를 끄면 대화 기록이 사라진다. Task는 Postgres에 남는다), FastAPI Task API, 인증.
+- 아직 없는 것: `interrupt()` 되묻기, 인증. 대화 기록은 Postgres가 아니라 `langgraph dev`가 `.langgraph_api/`에 파일로 저장한다. 재시작해도 남는 것을 확인했다. Postgres checkpointer는 `langgraph dev`에 끼울 수 없고 별도 서버 구성이 필요하다.
 
 ## 대상 찾기와 변경 (2026-10-30)
 - `parse`가 열린 Task와 최근 14일 안에 끝낸 Task를 `T1, T2 ...` ref로 프롬프트에 넣는다. LLM은 ref만 고르고, 목록에 없는 ref는 버린다.
@@ -57,6 +61,10 @@ AGENTS.md의 "First delivery"를 순서대로 쪼갠 것. 구현 순서는 DB sc
 - 수집기 순서: 2325, Slack, Claude Code. 앞에서 만든 Task를 뒤에서 CS 번호로 잇는다.
 - DM: `conversations.list`로 대화방을 얻고, 최근 3일 안에 활동이 있는 방만 `conversations.history`로 읽는다. 상태는 대화방당 하나(`{channel}:dm`), Task는 답하지 않은 묶음의 첫 메시지 ts 기준(`slack:{channel}:{ts}`).
 - 분류 경계: 명시적 요청 없이 현황만 공유하는 DM은 fyi로 분류될 수 있다. 같은 메시지가 실행마다 다르게 분류된 적이 있다. 마지막 메시지 기준으로 한 번만 분류하므로 새 메시지가 오기 전에는 다시 보지 않는다.
+
+## 웹 화면 (2026-10-30)
+- upstream Agent Chat UI를 `frontend/`에 넣으려 했지만 외부 코드의 `pnpm install`이 권한 확인에서 막혔다. 외부 패키지 없는 단일 페이지로 바꿨다. `app/web/index.html` 하나다.
+- 브라우저 확장이 연결돼 있지 않아 실제 렌더링은 확인하지 못했다. JS 문법, API, CORS, Windows에서의 접속은 확인했다.
 
 ## 테스트로 확인하는 것 (1단계)
 - 같은 owner의 같은 `request_id`로 Task 두 개를 만들 수 없다. owner가 다르면 된다.

@@ -1,0 +1,13 @@
+# 2325 DB 전용 터널 (127.0.0.1:13316). SSM 세션은 유휴 시 끊기므로 끊기면 다시 연다.
+[Unit]
+Description=Personal Agent OS 2325 DB tunnel
+
+[Service]
+ExecStart=%h/projects/personal-agent-os/infra/tunnel/2325-db-tunnel.sh
+Restart=always
+RestartSec=10
+# 포트만 열리고 DB에 안 닿는 반쯤 죽은 세션이 있어서 주기적으로 새로 연다.
+RuntimeMaxSec=6h
+
+[Install]
+WantedBy=default.target

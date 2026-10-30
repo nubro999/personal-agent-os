@@ -15,6 +15,7 @@ Task는 2325 건을 따라가는 거울이라 상태가 바뀌면 그대로 반�
 import asyncio
 import logging
 import re
+import time
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -43,6 +44,8 @@ log = logging.getLogger(__name__)
 
 SOURCE = "2325"
 TITLE_FEEDBACK_LIMIT = 40
+CONNECT_ATTEMPTS = 4
+CONNECT_RETRY_SECONDS = 10
 _STAGE_STATUS: dict[str, TaskStatus] = {
     "fixing": "in_progress",
     "communicating": "blocked",
@@ -90,17 +93,28 @@ class MaintItem:
         return f"{self.human_id} {summary}".strip() or self.item_key
 
 
-def fetch_items(env_file: Path, assignee: str) -> list[MaintItem]:
-    env = dotenv_values(env_file)
-    conn = pymysql.connect(
-        host=env["DB_HOST"] or "127.0.0.1",
-        port=int(env["DB_PORT"] or 13306),
-        user=env["DB_USER"] or "",
-        password=env["DB_PASSWORD"] or "",
-        database=env["MAINT_DB_NAME"] or "",
-        connect_timeout=5,
-        charset="utf8mb4",
-    )
+def _connect(env: dict[str, str | None], port: int) -> "pymysql.Connection[Any]":
+    """전용 터널이 재시작 중일 수 있어 몇 번 더 시도한다."""
+    for attempt in range(CONNECT_ATTEMPTS):
+        try:
+            return pymysql.connect(
+                host="127.0.0.1",
+                port=port,
+                user=env["DB_USER"] or "",
+                password=env["DB_PASSWORD"] or "",
+                database=env["MAINT_DB_NAME"] or "",
+                connect_timeout=5,
+                charset="utf8mb4",
+            )
+        except pymysql.err.OperationalError:
+            if attempt == CONNECT_ATTEMPTS - 1:
+                raise
+            time.sleep(CONNECT_RETRY_SECONDS)
+    raise AssertionError("unreachable")
+
+
+def fetch_items(env_file: Path, assignee: str, port: int) -> list[MaintItem]:
+    conn = _connect(dotenv_values(env_file), port)
     try:
         with conn.cursor(pymysql.cursors.DictCursor) as cur:
             cur.execute(QUERY, (assignee,))
@@ -210,18 +224,19 @@ async def run(items: list[MaintItem], now: datetime | None = None) -> MaintStats
     return stats
 
 
-async def run_once() -> None:
+async def run_once() -> str | None:
     settings = get_settings()
     try:
         items = await asyncio.to_thread(
             fetch_items,
             settings.maint_env_file,
             settings.maint_assignee_name,
+            settings.maint_db_port,
         )
     except (pymysql.err.OperationalError, KeyError, FileNotFoundError) as exc:
-        # 2325 터널(run.sh)이 꺼져 있으면 이번 주기는 건너뛴다.
+        # 전용 터널이 끊겨 있으면 이번 주기는 건너뛴다. 다음 주기에 다시 본다.
         log.warning("2325 tracker skipped: %s", exc)
-        return
+        return f"2325 DB 연결 실패: {type(exc).__name__}"
     stats = await run(items)
     log.info(
         "2325 tracker: items=%d created=%d updated=%d skipped_old=%d",
@@ -230,6 +245,7 @@ async def run_once() -> None:
         stats.updated,
         stats.skipped_old,
     )
+    return None
 
 
 def main() -> None:

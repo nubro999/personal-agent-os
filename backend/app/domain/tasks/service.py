@@ -1,6 +1,7 @@
 """Task 생성, 조회, 변경. 변경 함수는 커밋하지 않는다. 호출하는 쪽이 한 트랜잭션으로 감싼다."""
 
 import uuid
+from collections.abc import Sequence
 from dataclasses import dataclass, fields
 from datetime import date, timedelta
 from typing import Any
@@ -251,11 +252,17 @@ async def list_tasks(
     due_from: date | None = None,
     due_to: date | None = None,
     include_done: bool = False,
+    statuses: Sequence[TaskStatus] = (),
+    project: str | None = None,
 ) -> list[Task]:
     """기간을 주면 그 안에 마감이 있는 Task만, 안 주면 전부. 마감 빠른 순, 마감 없는 건 뒤로."""
     stmt = select(Task).where(Task.owner_id == owner_id)
-    if not include_done:
+    if statuses:
+        stmt = stmt.where(Task.status.in_(statuses))
+    elif not include_done:
         stmt = stmt.where(Task.status.not_in(("done", "cancelled")))
+    if project:
+        stmt = stmt.where(Task.project.ilike(f"%{project}%"))
     if due_from is not None:
         stmt = stmt.where(Task.due_date >= due_from)
     if due_to is not None:
@@ -319,3 +326,18 @@ async def list_pending_suggestions(
         .order_by(TaskSuggestion.created_at)
     )
     return [(row[0], row[1]) for row in (await session.execute(stmt)).all()]
+
+
+async def dismiss_suggestions(session: AsyncSession, *, owner_id: str, task_id: uuid.UUID) -> int:
+    """사용자가 아니라고 한 완료 제안을 내린다. 내린 개수를 돌려준다."""
+    result = await session.execute(
+        update(TaskSuggestion)
+        .where(
+            TaskSuggestion.owner_id == owner_id,
+            TaskSuggestion.task_id == task_id,
+            TaskSuggestion.status == "pending",
+        )
+        .values(status="dismissed", decided_at=func.now())
+        .returning(TaskSuggestion.id)
+    )
+    return len(result.all())
