@@ -26,6 +26,7 @@ async def run_all() -> None:
 
 def main() -> None:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+    logging.getLogger("httpx").setLevel(logging.WARNING)
     asyncio.run(run_all())
 
 

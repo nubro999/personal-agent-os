@@ -19,7 +19,7 @@ from app.persistence.models import (
     TaskSuggestion,
 )
 from app.trackers import slack
-from app.trackers.slack import SlackTriage, ThreadTriage, analyze_thread, thread_key
+from app.trackers.slack import SlackTriage, ThreadTriage, analyze_dm, analyze_thread, thread_key
 
 ME = "UME"
 NOW = datetime(2026, 10, 30, 12, 0, tzinfo=ZoneInfo("Asia/Seoul"))
@@ -56,8 +56,22 @@ def test_not_pending_after_i_reply() -> None:
 
 
 class FakeSlack:
-    def __init__(self, threads: dict[tuple[str, str], list[dict[str, Any]]]) -> None:
-        self.threads = threads
+    def __init__(
+        self,
+        threads: dict[tuple[str, str], list[dict[str, Any]]] | None = None,
+        dms: dict[str, list[dict[str, Any]]] | None = None,
+    ) -> None:
+        self.threads = threads or {}
+        self.dms = dms or {}
+
+    async def dm_channels(self) -> list[dict[str, Any]]:
+        return [{"id": d, "user": "U2", "updated": NOW.timestamp() * 1000} for d in self.dms]
+
+    async def history(self, channel: str, oldest: float) -> list[dict[str, Any]]:
+        return self.dms[channel]
+
+    async def user_name(self, user_id: str) -> str:
+        return "김재서"
 
     async def search_mentions(self, user_id: str, after: date) -> list[dict[str, Any]]:
         return [
@@ -212,3 +226,65 @@ async def test_cs_thread_without_my_task_is_skipped(owner: str) -> None:
 
     assert (stats.threads, stats.created) == (1, 0)
     assert await _tasks(owner) == {}
+
+
+def test_dm_pending_when_other_spoke_after_me() -> None:
+    messages = [
+        msg("1.0", "U2", "예전 얘기"),
+        msg("2.0", ME, "넵"),
+        msg("3.0", "U2", "CS-0004353 이거 봐주세요"),
+        msg("4.0", "U2", "급해요"),
+        {"ts": "5.0", "bot_id": "B1", "text": "자동 알림"},
+    ]
+
+    thread = analyze_dm("D1", messages, ME, "김재서")
+
+    assert (thread.pending, thread.thread_ts, thread.marker) == (True, "3.0", "4.000000")
+    assert (thread.cs_id, thread.root_text, thread.sync_id) == (
+        "CS-0004353",
+        "DM (김재서)",
+        "D1:dm",
+    )
+
+
+def test_dm_not_pending_after_my_reply() -> None:
+    assert not analyze_dm("D1", [msg("1.0", "U2", "요청"), msg("2.0", ME, "확인")], ME, "x").pending
+
+
+async def test_dm_request_creates_task_then_my_reply_suggests_completion(owner: str) -> None:
+    dm = [msg("1.0", "U2", "내일까지 반품 정책 정리해 주세요")]
+    client = FakeSlack(dms={"D1": dm})
+    llm = FakeLLM(triage(title="반품 정책 정리", project=None))
+
+    created = await slack.run(client, llm, now=NOW)
+    assert created.created == 1
+    assert await _tasks(owner) == {"반품 정책 정리": "todo"}
+    assert "[S1] 루트: DM (김재서)" in llm.prompts[0]
+
+    dm.append(msg("2.0", ME, "네 정리할게요"))
+    answered = await slack.run(client, FakeLLM(), now=NOW)
+
+    assert answered.suggested == 1
+    async with get_sessionmaker()() as session:
+        [(suggestion, task)] = await list_pending_suggestions(session, owner_id=owner)
+    assert (task.title, suggestion.explanation) == ("반품 정책 정리", "DM에 답했어요")
+
+
+async def test_dm_chatter_makes_no_task(owner: str) -> None:
+    client = FakeSlack(dms={"D1": [msg("1.0", "U2", "점심 뭐 먹어요?")]})
+
+    stats = await slack.run(client, FakeLLM(triage(kind="fyi", title=None)), now=NOW)
+
+    assert (stats.threads, stats.created) == (1, 0)
+    assert await _tasks(owner) == {}
+
+
+async def test_repeat_ping_keeps_slack_task_todo(owner: str) -> None:
+    dm = [msg("1.0", "U2", "반품 정책 정리 부탁드려요")]
+    client = FakeSlack(dms={"D1": dm})
+    await slack.run(client, FakeLLM(triage()), now=NOW)
+
+    dm.append(msg("2.0", "U2", "혹시 보셨나요?"))
+    await slack.run(client, FakeLLM(triage()), now=NOW)
+
+    assert await _tasks(owner) == {"쿠폰 안내 확인": "todo"}

@@ -12,7 +12,7 @@ AGENTS.md의 "First delivery"를 순서대로 쪼갠 것. 구현 순서는 DB sc
 | 6 | 자동 실행: Postgres restart 정책, systemd 사용자 유닛(에이전트, 수집기 타이머), Windows 로그인 때 WSL 깨우기 | 완료 (Windows 작업은 스크립트만, 직접 실행 필요) |
 | 7 | 업무 자동 트래킹 1: Claude Code 세션 수집기 | 완료 (2026-10-30) |
 | 8 | 업무 자동 트래킹 2: 2325 수집기 | 완료 (2026-10-30) |
-| 9 | 업무 자동 트래킹 3: Slack 수집기 | 완료 (2026-10-30). 공용 develop 토큰이라 develop이 들어간 채널만, DM 제외 |
+| 9 | 업무 자동 트래킹 3: Slack 수집기 (멘션, DM, 그룹 DM) | 완료 (2026-10-30). 내 user token 사용 |
 | 10 | Overmind Adapter (회사 지식 조회가 필요할 때) | 미착수 |
 
 ## 1단계에서 정한 것
@@ -55,6 +55,8 @@ AGENTS.md의 "First delivery"를 순서대로 쪼갠 것. 구현 순서는 DB sc
 - 내 차례인 스레드는 한 번의 Claude 호출로 묶어서 분류한다.
 - 처음 돌렸을 때 CS 스레드 11개가 "리마인드 확인" 같은 제목으로 Task가 됐는데, 9개는 남의 담당이고 2개는 이미 배포완료였다. 그래서 내 2325 Task가 없는 CS 스레드는 건너뛰게 했다.
 - 수집기 순서: 2325, Slack, Claude Code. 앞에서 만든 Task를 뒤에서 CS 번호로 잇는다.
+- DM: `conversations.list`로 대화방을 얻고, 최근 3일 안에 활동이 있는 방만 `conversations.history`로 읽는다. 상태는 대화방당 하나(`{channel}:dm`), Task는 답하지 않은 묶음의 첫 메시지 ts 기준(`slack:{channel}:{ts}`).
+- 분류 경계: 명시적 요청 없이 현황만 공유하는 DM은 fyi로 분류될 수 있다. 같은 메시지가 실행마다 다르게 분류된 적이 있다. 마지막 메시지 기준으로 한 번만 분류하므로 새 메시지가 오기 전에는 다시 보지 않는다.
 
 ## 테스트로 확인하는 것 (1단계)
 - 같은 owner의 같은 `request_id`로 Task 두 개를 만들 수 없다. owner가 다르면 된다.
