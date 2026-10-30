@@ -1,0 +1,16 @@
+# Personal Agent OS LangGraph 서버 (http://127.0.0.1:2024). WSL이 켜지면 자동으로 뜬다.
+[Unit]
+Description=Personal Agent OS task agent (LangGraph)
+
+[Service]
+WorkingDirectory=%h/projects/personal-agent-os/backend
+# 있으면 구독 대신 API로 과금되므로 지운다. 앱도 이 값이 있으면 실행을 거부한다.
+UnsetEnvironment=ANTHROPIC_API_KEY
+# Postgres 컨테이너는 docker restart 정책으로 뜬다. 포트가 열릴 때까지 기다린다.
+ExecStartPre=/bin/bash -c 'for i in $(seq 1 60); do (echo > /dev/tcp/127.0.0.1/5433) 2>/dev/null && exit 0; sleep 1; done; exit 1'
+ExecStart=%h/.local/bin/uv run --frozen langgraph dev --no-browser --no-reload --host 127.0.0.1 --port 2024
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target

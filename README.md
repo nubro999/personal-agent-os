@@ -2,7 +2,7 @@
 
 개인 개발·운영 업무를 자연어로 관리하고, 필요한 회사 맥락을 조회하며, 검증된 자동화 작업을 승인 후 실행하는 개인 AI 업무 시스템.
 
-> 상태: **구현 1단계** (2026-10-30). 로컬 Postgres, backend 뼈대, Task 테이블 migration, health API까지 있다. Task CRUD, LangGraph, UI는 아직 없다. 진행 상황은 [구현 계획](docs/IMPLEMENTATION_PLAN.md)을 본다.
+> 상태: **개인용 동작 중** (2026-10-30). 채팅으로 Task 등록, 조회, 완료, 수정, 미루기, 취소, 다시 열기가 된다. Claude Code 세션 기록에서 한 일을 30분마다 자동으로 찾아 Task로 남긴다. 진행 상황은 [구현 계획](docs/IMPLEMENTATION_PLAN.md)을 본다.
 
 ## 결정된 방향
 
@@ -39,7 +39,7 @@
 1. [AGENTS.md](AGENTS.md)를 먼저 읽는다.
 2. [프로젝트 맥락](docs/PROJECT_CONTEXT.md)과 [아키텍처](docs/ARCHITECTURE.md)를 읽는다.
 3. [구현 계획](docs/IMPLEMENTATION_PLAN.md)의 첫 단계부터 구현한다.
-4. 회사 Overmind 연결은 초기 MVP에서 **모의 Adapter만** 두고 실데이터 접근은 별도 승인 및 환경 구성 후 연결한다.
+4. 회사 데이터는 직접 읽어도 된다. Overmind는 회사 지식 조회가 필요할 때 붙인다.
 
 ## 로컬 실행
 
@@ -52,10 +52,38 @@ uv sync
 uv run alembic upgrade head
 uv run uvicorn app.main:app --reload   # GET /health
 
+# 에이전트 (LangGraph dev server, http://localhost:2024)
+cp -n .env.example .env
+unset ANTHROPIC_API_KEY                # 있으면 구독 대신 API로 과금되므로 실행을 거부한다
+uv run langgraph dev --no-browser
+
 # 검사
 uv run ruff check . && uv run ruff format --check . && uv run mypy app tests migrations
 uv run pytest
 ```
+
+## 자동 실행
+
+```bash
+infra/systemd/install.sh   # pao-agent(LangGraph 서버), pao-tracker.timer(30분마다 수집) 등록
+```
+
+- Postgres는 docker `restart: unless-stopped`, 에이전트와 수집기는 systemd 사용자 유닛으로 WSL이 켜지면 같이 뜬다.
+- Windows 로그인 때 WSL을 깨우고 계속 켜 두려면 Windows PowerShell에서 `infra/windows/register-wsl-autostart.ps1`을 한 번 실행한다.
+- 로그: `journalctl --user -u pao-agent -f`, `journalctl --user -u pao-tracker -n 50`
+- 수집기 수동 실행: `cd backend && uv run python -m app.trackers.claude_code`
+
+## 업무 자동 트래킹 (Claude Code 세션)
+
+`~/.claude/projects/*/*.jsonl` 중 사람이 직접 쓴 세션(Claude Desktop, CLI)만 읽는다. 자동화 실행(sdk)은 건너뛴다.
+- 새로 보이는 일: Task로 만든다 (`source=claude_code`, 근거는 `external`).
+- 기존 Task와 이어지는 일: 할 일이면 진행 중으로 바꾼다.
+- 기존 Task가 끝난 것 같으면: 완료 제안만 남긴다. 할 일을 조회하면 같이 보여 주고, "끝났어"라고 하면 정리된다.
+- 마지막 활동 뒤 20분 조용한 세션만 읽고, 읽은 위치부터 이어서 본다. 원문은 저장하지 않고 세션 요약과 근거 한 문장만 남긴다.
+
+채팅 UI는 https://agentchat.vercel.app 에서 Deployment URL `http://localhost:2024`, Assistant ID `task_agent`로 연결한다. LangSmith API Key는 비워 둔다.
+
+LLM은 Claude Agent SDK로 로그인된 Claude Code 인증(개인 Claude Max 구독)을 쓴다. 혼자 쓰는 로컬 용도로만 쓴다. 사용량은 claude.ai, Claude Code와 같은 한도를 나눠 쓴다. 모델은 `PAO_LLM_MODEL`(기본 `claude-sonnet-5-5`).
 
 테스트는 `pao_test` DB의 스키마를 매번 지우고 migration을 다시 적용한다. `_test`로 끝나지 않는 DB에서는 실행을 거부한다.
 
@@ -70,4 +98,4 @@ uv run pytest
 
 ## 보안
 
-이 저장소는 비공개로 유지한다. 회사의 원본 데이터, 인증정보, 고객별 응대 로그, 내부 코드 복사본을 이 저장소에 커밋하지 않는다. 외부 시스템 변경·메시지 전송·배포는 명시적인 승인 게이트를 거친다.
+이 저장소는 비공개로 유지한다. 회사 데이터는 직접 읽어 로컬 DB에 둘 수 있지만, 인증정보와 원본 데이터(응대 로그, 내부 코드 복사본)는 git에 커밋하지 않는다. 외부 시스템 변경·메시지 전송·배포는 명시적인 승인 게이트를 거친다.

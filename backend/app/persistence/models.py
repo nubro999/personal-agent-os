@@ -19,7 +19,14 @@ from sqlalchemy import (
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
-from app.domain.tasks.values import FIELD_ORIGINS, LINK_RELATIONS, TASK_PRIORITIES, TASK_STATUSES
+from app.domain.tasks.values import (
+    FIELD_ORIGINS,
+    LINK_RELATIONS,
+    SUGGESTION_KINDS,
+    SUGGESTION_STATUSES,
+    TASK_PRIORITIES,
+    TASK_STATUSES,
+)
 from app.persistence.base import Base
 
 
@@ -116,3 +123,44 @@ class TaskLink(Base):
     parent_task_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("tasks.id"), primary_key=True)
     child_task_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("tasks.id"), primary_key=True)
     relation: Mapped[str] = mapped_column(Text, primary_key=True)
+
+
+class TaskSuggestion(Base):
+    """수집기가 낸 제안. 사용자가 확인해야 Task에 반영된다."""
+
+    __tablename__ = "task_suggestions"
+    __table_args__ = (
+        CheckConstraint(_in_list("kind", SUGGESTION_KINDS), name="kind"),
+        CheckConstraint(_in_list("status", SUGGESTION_STATUSES), name="status"),
+        UniqueConstraint("task_id", "kind", "source_reference"),
+    )
+
+    id: Mapped[uuid.UUID] = _uuid_pk()
+    owner_id: Mapped[str] = mapped_column(Text, nullable=False)
+    task_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("tasks.id"), nullable=False)
+    kind: Mapped[str] = mapped_column(Text, nullable=False)
+    source: Mapped[str] = mapped_column(Text, nullable=False)
+    source_reference: Mapped[str] = mapped_column(Text, nullable=False)
+    explanation: Mapped[str | None] = mapped_column(Text)
+    status: Mapped[str] = mapped_column(Text, nullable=False, server_default="pending")
+    created_at: Mapped[datetime] = _created_at()
+    decided_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class ActivitySession(Base):
+    """수집기가 어디까지 읽었는지. 원문은 저장하지 않고 요약만 남긴다."""
+
+    __tablename__ = "activity_sessions"
+    __table_args__ = (UniqueConstraint("owner_id", "source", "external_id"),)
+
+    id: Mapped[uuid.UUID] = _uuid_pk()
+    owner_id: Mapped[str] = mapped_column(Text, nullable=False)
+    source: Mapped[str] = mapped_column(Text, nullable=False)
+    external_id: Mapped[str] = mapped_column(Text, nullable=False)
+    workspace: Mapped[str | None] = mapped_column(Text)
+    processed_lines: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
+    last_activity_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    summary: Mapped[str | None] = mapped_column(Text)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now()
+    )

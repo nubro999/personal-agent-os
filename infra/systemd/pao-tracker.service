@@ -1,0 +1,10 @@
+# Claude Code 세션 기록에서 한 일을 찾아 Task로 남긴다. pao-tracker.timer가 30분마다 실행한다.
+[Unit]
+Description=Personal Agent OS Claude Code activity tracker
+
+[Service]
+Type=oneshot
+WorkingDirectory=%h/projects/personal-agent-os/backend
+UnsetEnvironment=ANTHROPIC_API_KEY
+ExecStart=%h/.local/bin/uv run --frozen python -m app.trackers.claude_code
+TimeoutStartSec=30min

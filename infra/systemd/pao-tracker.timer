@@ -1,0 +1,11 @@
+[Unit]
+Description=Run Personal Agent OS tracker every 30 minutes
+
+[Timer]
+OnBootSec=5min
+OnUnitActiveSec=30min
+# 꺼져 있던 동안 놓친 실행은 켜질 때 한 번 몰아서 한다.
+Persistent=true
+
+[Install]
+WantedBy=timers.target
