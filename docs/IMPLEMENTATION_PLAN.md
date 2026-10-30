@@ -11,8 +11,9 @@ AGENTS.md의 "First delivery"를 순서대로 쪼갠 것. 구현 순서는 DB sc
 | 5 | Agent Chat UI 연결: LangGraph server와 FastAPI 라우팅 결정 후 문서화 | 데모: 호스팅 UI에서 `langgraph dev` 직접 연결 |
 | 6 | 자동 실행: Postgres restart 정책, systemd 사용자 유닛(에이전트, 수집기 타이머), Windows 로그인 때 WSL 깨우기 | 완료 (Windows 작업은 스크립트만, 직접 실행 필요) |
 | 7 | 업무 자동 트래킹 1: Claude Code 세션 수집기 | 완료 (2026-10-30) |
-| 8 | 업무 자동 트래킹 2: Slack, 2325 수집기 | 미착수 |
-| 9 | Overmind Adapter (회사 지식 조회가 필요할 때) | 미착수 |
+| 8 | 업무 자동 트래킹 2: 2325 수집기 | 완료 (2026-10-30) |
+| 9 | 업무 자동 트래킹 3: Slack 수집기 | 대기: 사용자 Slack ID 필요. 공용 develop 토큰은 develop 계정이 들어간 채널만 검색된다 |
+| 10 | Overmind Adapter (회사 지식 조회가 필요할 때) | 미착수 |
 
 ## 1단계에서 정한 것
 - 로컬 DB 포트는 `5433` (다른 프로젝트 Postgres와 겹치지 않게). `POSTGRES_PORT`로 바꿀 수 있다.
@@ -41,6 +42,12 @@ AGENTS.md의 "First delivery"를 순서대로 쪼갠 것. 구현 순서는 DB sc
 - 읽은 위치는 `activity_sessions.processed_lines`. LLM이 실패하면 위치를 올리지 않아 다음 실행에서 다시 본다.
 - 처음 실행은 최근 24시간(`PAO_TRACKER_LOOKBACK_HOURS`), 활동 뒤 20분 조용한 세션만(`PAO_TRACKER_IDLE_MINUTES`).
 - 수집기가 직접 하는 변경은 Task 생성과 todo에서 진행 중으로 바꾸기뿐이다. 완료는 `task_suggestions`에 제안만 남긴다.
+
+## 2325 수집기 (2026-10-30)
+- `app/trackers/maintenance.py`. `maintenance_assignment` + `assignee` + `wi_ax_item` + `maintenance_status`를 읽기만 한다.
+- Task 하나가 2325 건 하나를 따라간다. `request_id = 2325:{item_key}`라 같은 건으로 Task가 두 번 생기지 않는다.
+- 마지막으로 본 2325 상태(`stage|status_group`)를 `activity_sessions.summary`에 둔다. 바뀐 건만 처리해서 849건 중 실제 쓰기는 변화가 있을 때뿐이다.
+- 수집기들은 `python -m app.trackers`로 한 이벤트 루프에서 차례로 돈다(async DB 엔진이 루프에 묶인다). 하나가 실패해도 나머지는 돈다.
 
 ## 테스트로 확인하는 것 (1단계)
 - 같은 owner의 같은 `request_id`로 Task 두 개를 만들 수 없다. owner가 다르면 된다.

@@ -314,9 +314,8 @@ async def run(
     return stats
 
 
-def main() -> None:
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
-    stats = asyncio.run(run(Path(get_settings().claude_projects_dir).expanduser()))
+async def run_once() -> None:
+    stats = await run(get_settings().claude_projects_dir)
     log.info(
         "claude_code tracker: sessions=%d created=%d started=%d suggested=%d failed=%d",
         stats.sessions,
@@ -325,6 +324,11 @@ def main() -> None:
         stats.suggested,
         stats.failed,
     )
+
+
+def main() -> None:
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+    asyncio.run(run_once())
 
 
 if __name__ == "__main__":

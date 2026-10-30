@@ -2,7 +2,7 @@
 
 개인 개발·운영 업무를 자연어로 관리하고, 필요한 회사 맥락을 조회하며, 검증된 자동화 작업을 승인 후 실행하는 개인 AI 업무 시스템.
 
-> 상태: **개인용 동작 중** (2026-10-30). 채팅으로 Task 등록, 조회, 완료, 수정, 미루기, 취소, 다시 열기가 된다. Claude Code 세션 기록에서 한 일을 30분마다 자동으로 찾아 Task로 남긴다. 진행 상황은 [구현 계획](docs/IMPLEMENTATION_PLAN.md)을 본다.
+> 상태: **개인용 동작 중** (2026-10-30). 채팅으로 Task 등록, 조회, 완료, 수정, 미루기, 취소, 다시 열기가 된다. Claude Code 세션 기록과 2325 담당 건을 30분마다 읽어 Task로 맞춘다. 진행 상황은 [구현 계획](docs/IMPLEMENTATION_PLAN.md)을 본다.
 
 ## 결정된 방향
 
@@ -65,13 +65,13 @@ uv run pytest
 ## 자동 실행
 
 ```bash
-infra/systemd/install.sh   # pao-agent(LangGraph 서버), pao-tracker.timer(30분마다 수집) 등록
+infra/systemd/install.sh   # pao-agent(LangGraph 서버), pao-tracker.timer(30분마다 수집기 전부) 등록
 ```
 
 - Postgres는 docker `restart: unless-stopped`, 에이전트와 수집기는 systemd 사용자 유닛으로 WSL이 켜지면 같이 뜬다.
 - Windows 로그인 때 WSL을 깨우고 계속 켜 두려면 Windows PowerShell에서 `infra/windows/register-wsl-autostart.ps1`을 한 번 실행한다.
 - 로그: `journalctl --user -u pao-agent -f`, `journalctl --user -u pao-tracker -n 50`
-- 수집기 수동 실행: `cd backend && uv run python -m app.trackers.claude_code`
+- 수집기 수동 실행: `cd backend && uv run python -m app.trackers` (하나만: `app.trackers.maintenance`, `app.trackers.claude_code`)
 
 ## 업무 자동 트래킹 (Claude Code 세션)
 
@@ -80,6 +80,14 @@ infra/systemd/install.sh   # pao-agent(LangGraph 서버), pao-tracker.timer(30�
 - 기존 Task와 이어지는 일: 할 일이면 진행 중으로 바꾼다.
 - 기존 Task가 끝난 것 같으면: 완료 제안만 남긴다. 할 일을 조회하면 같이 보여 주고, "끝났어"라고 하면 정리된다.
 - 마지막 활동 뒤 20분 조용한 세션만 읽고, 읽은 위치부터 이어서 본다. 원문은 저장하지 않고 세션 요약과 근거 한 문장만 남긴다.
+
+## 업무 자동 트래킹 (2325 담당 건)
+
+2325(maintenance_list) DB에서 담당자 `PAO_MAINT_ASSIGNEE_NAME`(기본 신형섭)으로 배정된 건을 읽는다. DB 접속 정보는 `PAO_MAINT_ENV_FILE`(기본 maintenance_list/.env)에서 실행할 때 읽고, 터널(`maintenance_list/run.sh`)이 꺼져 있으면 그 주기는 건너뛴다.
+- 2325 단계가 기준이다: 수정중은 진행 중, 고객사 소통중은 막힘, 팀장 확인중과 배포완료는 완료, 반려는 취소. 단계가 없으면 ax 상태로 끝났는지만 본다.
+- 처음에는 최근 30일 안에 접수된 열린 건만 Task로 만든다(`PAO_MAINT_LOOKBACK_DAYS`). 만든 Task는 2325 상태가 바뀔 때마다 따라간다.
+- 2325 쪽 상태가 그대로면 채팅으로 바꾼 상태를 되돌리지 않는다.
+- 2325 수집기가 먼저 돌아서 Claude Code 세션이 CS 번호로 2325 Task에 이어진다.
 
 채팅 UI는 https://agentchat.vercel.app 에서 Deployment URL `http://localhost:2024`, Assistant ID `task_agent`로 연결한다. LangSmith API Key는 비워 둔다.
 
