@@ -37,6 +37,8 @@ class Settings(BaseSettings):
     # 온톨로지. 회사 자료라 이 저장소가 아니라 glab_mt 쪽에 둔다.
     ontology_dir: Path = Path("~/glab/glab_mt/_ontology")
     brand_context_dir: Path = Path("~/glab/glab_mt/auto_cs_maintenance/brands/context")
+    # 문제 턴을 찾는 회사 코드(tools.chat.target.find)를 그대로 쓴다.
+    auto_cs_dir: Path = Path("~/glab/glab_mt/auto_cs_maintenance")
     web_dist_dir: Path = Path(__file__).resolve().parents[2] / "frontend" / "dist"
     toast_script: str = (
         r"\\wsl.localhost\Ubuntu\home\nubroo\projects\personal-agent-os"
@@ -47,6 +49,7 @@ class Settings(BaseSettings):
     @field_validator(
         "ontology_dir",
         "brand_context_dir",
+        "auto_cs_dir",
         "claude_projects_dir",
         "maint_env_file",
         "slack_token_file",

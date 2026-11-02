@@ -93,8 +93,10 @@ class MaintItem:
         return f"{self.human_id} {summary}".strip() or self.item_key
 
 
-def connect(env: dict[str, str | None], port: int) -> "pymysql.Connection[Any]":
-    """전용 터널이 재시작 중일 수 있어 몇 번 더 시도한다."""
+def connect(
+    env: dict[str, str | None], port: int, database: str | None = None
+) -> "pymysql.Connection[Any]":
+    """전용 터널이 재시작 중일 수 있어 몇 번 더 시도한다. 채팅 DB도 같은 서버, 같은 계정이다."""
     for attempt in range(CONNECT_ATTEMPTS):
         try:
             return pymysql.connect(
@@ -102,7 +104,7 @@ def connect(env: dict[str, str | None], port: int) -> "pymysql.Connection[Any]":
                 port=port,
                 user=env["DB_USER"] or "",
                 password=env["DB_PASSWORD"] or "",
-                database=env["MAINT_DB_NAME"] or "",
+                database=database or env["MAINT_DB_NAME"] or "",
                 connect_timeout=5,
                 charset="utf8mb4",
             )

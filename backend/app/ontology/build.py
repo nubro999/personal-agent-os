@@ -8,6 +8,7 @@ import json
 import logging
 import sys
 from collections import Counter
+from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -18,7 +19,9 @@ from app.config import get_settings
 from app.ontology.concepts import Concept, load_concepts, load_verbs
 from app.ontology.instances import Graph, add_brand_context, add_brand_map, add_s3_context
 from app.ontology.instances_2325 import add_2325
+from app.ontology.instances_chat import add_chat
 from app.ontology.source_2325 import fetch_rows
+from app.ontology.source_chat import fetch_chat
 
 log = logging.getLogger(__name__)
 
@@ -36,7 +39,10 @@ def check_links(concepts: list[Concept], graph: Graph) -> None:
 
 
 def build(
-    ontology_dir: Path, brand_context: Path, rows_2325: dict[str, Any] | None = None
+    ontology_dir: Path,
+    brand_context: Path,
+    rows_2325: dict[str, Any] | None = None,
+    chat: dict[str, Any] | None = None,
 ) -> tuple[dict[str, Any], str]:
     verbs = load_verbs(ontology_dir / "verbs.yaml")
     concepts = load_concepts(ontology_dir / "concepts", verbs)
@@ -48,6 +54,8 @@ def build(
     add_s3_context(graph, overmind / "context", configs)
     if rows_2325:
         add_2325(graph, rows_2325, brands, customers)
+    if chat:
+        add_chat(graph, chat, brands)
 
     unknown = {node.concept for node in graph.nodes.values()} - known
     if unknown:
@@ -116,6 +124,8 @@ def render_gaps(concepts: list[Concept], counts: Counter[str], graph: Graph) -> 
         + (", ".join(graph.unmatched_brands) or "없음"),
         f"- 매뉴얼의 정책 id가 정책 문서에 없는 곳 {len(graph.unresolved_policies)}개",
         f"- 정보 문서 없이 step에서만 참조된 정보 참조 {graph.info_without_doc}개",
+        f"- 읽지 못한 채팅 DB {len(graph.unread_chat_dbs)}개: "
+        + (", ".join(graph.unread_chat_dbs) or "없음"),
         "",
         "## 연결 실측",
         "",
@@ -144,27 +154,37 @@ def render_gaps(concepts: list[Concept], counts: Counter[str], graph: Graph) -> 
     return "\n".join(lines) + "\n"
 
 
-def load_2325(cache: Path, env_file: Path, port: int) -> dict[str, Any] | None:
+def _load(cache: Path, fetch: Callable[[], dict[str, Any]]) -> dict[str, Any] | None:
     """터널이 끊겨 있으면 지난번에 받은 행으로 만든다."""
     try:
-        rows = fetch_rows(env_file, port)
+        rows = fetch()
     except (pymysql.err.OperationalError, KeyError, FileNotFoundError) as exc:
-        log.warning("2325 not reachable, using cache: %s", exc)
-        return json.loads(cache.read_text(encoding="utf-8")) if cache.is_file() else None
+        log.warning("db not reachable, using cache %s: %s", cache.name, exc)
+        return _cached(cache)
     cache.parent.mkdir(parents=True, exist_ok=True)
     cache.write_text(json.dumps(rows, ensure_ascii=False), encoding="utf-8")
     return rows
 
 
+def _cached(cache: Path) -> dict[str, Any] | None:
+    if not cache.is_file():
+        return None
+    data: dict[str, Any] = json.loads(cache.read_text(encoding="utf-8"))
+    return data
+
+
 def main() -> None:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     settings = get_settings()
-    cache = settings.ontology_dir / "source" / "2325" / "rows.json"
+    cache_dir = settings.ontology_dir / "source" / "2325"
+    rows_cache, chat_cache = cache_dir / "rows.json", cache_dir / "chat.json"
     if "--cached" in sys.argv:
-        rows = json.loads(cache.read_text(encoding="utf-8")) if cache.is_file() else None
+        rows, chat = _cached(rows_cache), _cached(chat_cache)
     else:
-        rows = load_2325(cache, settings.maint_env_file, settings.maint_db_port)
-    data, gaps = build(settings.ontology_dir, settings.brand_context_dir, rows)
+        env_file, port = settings.maint_env_file, settings.maint_db_port
+        rows = _load(rows_cache, lambda: fetch_rows(env_file, port))
+        chat = _load(chat_cache, lambda: fetch_chat(env_file, port, settings.auto_cs_dir))
+    data, gaps = build(settings.ontology_dir, settings.brand_context_dir, rows, chat)
     out = settings.ontology_dir / "build"
     out.mkdir(parents=True, exist_ok=True)
     (out / "instances.json").write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")

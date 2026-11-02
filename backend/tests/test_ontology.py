@@ -7,6 +7,7 @@ from httpx import AsyncClient
 from app.config import get_settings
 from app.ontology.build import build
 from app.ontology.concepts import ConceptError, load_concepts, load_verbs
+from app.ontology.source_chat import read_db, selected_manuals, slim_turn, visited_steps
 
 CONCEPT = """---
 id: {id}
@@ -25,6 +26,14 @@ relations: {relations}
 RELATIONS: dict[str, list[tuple[str, str, str, str]]] = {
     "brand": [("customer", "belongs_to", "확정", "맵")],
     "bot_config": [("brand", "configures", "확정", "표")],
+    "conversation": [("brand", "belongs_to", "확정", "표")],
+    "turn": [
+        ("conversation", "belongs_to", "확정", "표"),
+        ("category", "selected", "확정", "표"),
+        ("info", "loaded", "추정", "표"),
+        ("step", "visited", "추정", "표"),
+    ],
+    "tool_call": [("turn", "belongs_to", "확정", "표"), ("function", "invokes", "확정", "표")],
     "info": [("bot_config", "belongs_to", "확정", "표")],
     "policy": [("brand", "applies_to", "확정", "표"), ("customer", "applies_to", "확정", "표")],
     "category": [("bot_config", "belongs_to", "확정", "표"), ("function", "uses", "확정", "표")],
@@ -43,6 +52,8 @@ RELATIONS: dict[str, list[tuple[str, str, str, str]]] = {
         ("brand", "targets", "확정", "표"),
         ("customer", "targets", "확정", "표"),
         ("user", "assigned_to", "확정", "표"),
+        ("conversation", "refers_to", "확정", "표"),
+        ("turn", "refers_to", "확정", "표"),
     ],
     "run": [("case", "processes", "확정", "표")],
     "agent": [("run", "executes", "확정", "표")],
@@ -90,6 +101,9 @@ NAMES = {
     "promotion": "반영",
     "fix_record": "수정 기록",
     "period_event": "기간 이벤트",
+    "conversation": "대화",
+    "turn": "턴",
+    "tool_call": "함수 호출",
 }
 
 
@@ -395,3 +409,132 @@ def test_2325_rows_become_linked_instances(ontology: tuple[Path, Path]) -> None:
     assert "| 실행 → 건 | 1 | 2 | 50% |" in gaps
     assert "| 담당 → 사용자 | 1 | 2 | 50% |" in gaps
     assert "| 변경 항목 → 카테고리, 정보 | 2 | 2 | 100% |" in gaps
+
+
+RAW_TURN = {
+    "id": 11,
+    "chat_room_id": 5,
+    "status": "ai_answered",
+    "agent_name": "guide:chat",
+    "time": "2026-10-21 16:07:23",
+    "question": "윤창호 010 3243 3700 환불해 주세요",
+    "ai_answer": "확인해 드릴게요",
+    "manual_usage": json.dumps(
+        {
+            "manuals": [
+                {"category": "배송문의", "category_id": 1, "used": False, "p": 0.03},
+                {"category": "A/S문의", "category_id": 3630, "used": True, "p": 0.96},
+            ]
+        }
+    ),
+    "ai_cots": json.dumps(["윤창호 고객 step1 달성, step1 다시, step3 이동"]),
+    "tags": json.dumps([None, "[AS 기간]", "[새 정보]"]),
+    "functions": json.dumps(["get_order_info"]),
+}
+
+
+def test_slim_turn_keeps_only_structure() -> None:
+    turn = slim_turn("oa_v2", RAW_TURN)
+
+    assert turn["selected"] == [{"category": "A/S문의", "id": 3630, "p": 0.96}]
+    assert turn["tags"] == ["[AS 기간]", "[새 정보]"]
+    assert turn["functions"] == ["get_order_info"]
+    assert turn["steps"] == [1, 3]
+    saved = json.dumps(turn, ensure_ascii=False)
+    assert "윤창호" not in saved and "010" not in saved and "환불" not in saved
+
+
+def test_turn_without_judgement_selects_nothing() -> None:
+    assert selected_manuals(None) == [] and visited_steps(None) == []
+
+
+class FakeCursor:
+    def __init__(self) -> None:
+        self.calls: list[str] = []
+        self.rows: list[dict[str, object]] = []
+
+    def __enter__(self) -> "FakeCursor":
+        return self
+
+    def __exit__(self, *_: object) -> None:
+        return None
+
+    def execute(self, sql: str, params: object = None) -> None:
+        self.calls.append(sql)
+        if "FROM chat_room" in sql:
+            self.rows = [{"id": 5, "user_chat_id": "chat-1", "platform": "zerotalk"}]
+        elif "FROM conversation" in sql:
+            self.rows = [RAW_TURN]
+
+    def fetchall(self) -> list[dict[str, object]]:
+        return self.rows
+
+
+class FakeConn:
+    def __init__(self) -> None:
+        self.cur = FakeCursor()
+
+    def cursor(self, *_: object) -> FakeCursor:
+        return self.cur
+
+
+def test_read_db_finds_problem_turn_in_memory_and_stays_read_only() -> None:
+    seen: list[object] = []
+
+    def finder(feedback: str, turns: list[dict[str, object]], room: object) -> dict[str, object]:
+        seen.append(turns[0]["question"])
+        return {"conv_id": 11, "method": "인용 일치", "score": 1.0}
+
+    conn = FakeConn()
+    cases = [{"item_key": "Xcs_1", "chat_id": "chat-1", "feedback": "요청"}]
+    out = read_db(conn, "oa_v2", cases, finder)
+
+    assert "READ ONLY" in conn.cur.calls[0]
+    assert seen == [RAW_TURN["question"]]
+    assert out["problems"] == [
+        {
+            "item_key": "Xcs_1",
+            "db": "oa_v2",
+            "room": 5,
+            "turn": 11,
+            "method": "인용 일치",
+            "score": 1.0,
+        }
+    ]
+    assert "윤창호" not in json.dumps(out, ensure_ascii=False)
+
+
+def chat_rows() -> dict[str, object]:
+    return {
+        "conversations": [{"db": "oa_v2", "room": 5, "platform": "zerotalk", "handoff": None}],
+        "turns": [
+            slim_turn("oa_v2", RAW_TURN),
+            {"db": "oa_v2", "room": 5, "id": 12, "status": "x", "selected": [], "steps": [1]},
+        ],
+        "problems": [
+            {"item_key": "Xcs_1", "db": "oa_v2", "room": 5, "turn": 11, "method": "인용 일치"},
+            {"item_key": "Xcs_2", "db": "oa_v2", "room": 5, "turn": 12, "method": "추정"},
+        ],
+        "skipped": {"carmore_v2": "읽기 실패 1146"},
+    }
+
+
+def test_chat_rows_prove_what_a_turn_actually_did(ontology: tuple[Path, Path]) -> None:
+    data, gaps = build(*ontology, rows_2325(), chat_rows())
+
+    links = {(x["source"], x["name"], x["target"]): x["confidence"] for x in data["links"]}
+    turn = "turn:oa_v2:11"
+    assert (turn, "belongs_to", "conversation:oa_v2:5") in links
+    assert ("conversation:oa_v2:5", "belongs_to", "brand:b_oakr") in links
+    assert ("tool_call:oa_v2:11:0", "belongs_to", turn) in links
+    assert ("tool_call:oa_v2:11:0", "invokes", "function:oa_v2:get_order_info") in links
+    # 같은 카테고리 id로 찾아 이름이 달라도 한 사례로 잇는다.
+    assert links[(turn, "selected", "category:oa_v2:A/S문의")] == "확정"
+    assert links[(turn, "loaded", "info:oa_v2:[AS 기간]")] == "추정"
+    assert links[(turn, "visited", "step:oa_v2:A/S문의:1")] == "추정"
+    assert ("case:Xcs_1", "refers_to", "conversation:oa_v2:5") in links
+    assert links[("case:Xcs_1", "refers_to", turn)] == "확정"
+    assert links[("case:Xcs_2", "refers_to", "turn:oa_v2:12")] == "추정"
+    assert "| 턴 → 고른 매뉴얼 판정 있음 | 1 | 2 | 50% |" in gaps
+    assert "| 건 → 문제 턴 인용 근거 | 1 | 2 | 50% |" in gaps
+    assert "carmore_v2 (읽기 실패 1146)" in gaps

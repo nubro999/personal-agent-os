@@ -44,6 +44,7 @@ class Graph:
     db_bots: dict[str, list[str]] = field(default_factory=dict)
     company_bot: dict[int, str] = field(default_factory=dict)
     bot_config: dict[str, str] = field(default_factory=dict)
+    unread_chat_dbs: list[str] = field(default_factory=list)
     measured: dict[str, tuple[int, int]] = field(default_factory=dict)
 
     def measure(self, name: str, hit: int, total: int) -> None:
@@ -72,9 +73,10 @@ class Graph:
 
 
 def _short(value: Any) -> str:
+    if value is None:
+        return ""
     text = value if isinstance(value, str) else json.dumps(value, ensure_ascii=False)
-    text = re.sub(r"\s+", " ", text or "").strip()
-    return text[:DETAIL_LIMIT]
+    return re.sub(r"\s+", " ", text).strip()[:DETAIL_LIMIT]
 
 
 def _read(path: Path) -> dict[str, Any]:
