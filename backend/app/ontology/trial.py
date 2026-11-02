@@ -274,7 +274,9 @@ def before_bodies(
     return before, created
 
 
-def _tools(view: OntologyView, cutoff: dict[str, int]) -> list[Any]:
+def ontology_tools(view: OntologyView, cutoff: dict[str, int]) -> list[Any]:
+    """온톨로지 조회 네 개와 응대 당시 기록을 읽는 다섯 개. cutoff 뒤의 턴은 읽지 못한다."""
+
     def text(value: Any) -> dict[str, Any]:
         return {"content": [{"type": "text", "text": json.dumps(value, ensure_ascii=False)}]}
 
@@ -374,7 +376,7 @@ def _tools(view: OntologyView, cutoff: dict[str, int]) -> list[Any]:
 async def run_trial(
     view: OntologyView, case_id: str, cutoff: dict[str, int]
 ) -> tuple[TrialResult | None, list[str], str]:
-    tools = _tools(view, cutoff)
+    tools = ontology_tools(view, cutoff)
     server = create_sdk_mcp_server("onto", tools=tools)
     options = ClaudeAgentOptions(
         model=MODEL,
@@ -488,9 +490,9 @@ def report(
     return "\n".join(lines) + "\n", score
 
 
-async def main_async(case_ids: list[str]) -> None:
-    settings = get_settings()
-    root = settings.ontology_dir
+def load_ontology() -> tuple[dict[str, Any], dict[str, dict[str, Any]], dict[str, str]]:
+    """(사례 그래프, 개념, 동사 뜻). 에이전트에게 보여 줄 온톨로지 재료."""
+    root = get_settings().ontology_dir
     data = json.loads((root / "build" / "instances.json").read_text(encoding="utf-8"))
     verbs = load_verbs(root / "verbs.yaml")
     concepts = {
@@ -506,17 +508,34 @@ async def main_async(case_ids: list[str]) -> None:
         for c in load_concepts(root / "concepts", verbs)
     }
     definitions = {name: verb.definition for name, verb in verbs.items()}
+    return data, concepts, definitions
+
+
+def hide_case_work(data: dict[str, Any], case_id: str) -> tuple[set[str], dict[str, str]]:
+    """(숨길 노드, 고치기 전 본문). 그 건을 처리하기 전의 온톨로지로 되돌린다."""
+    hidden, _ = hidden_for(data, case_id)
+    targets = change_targets(data, hidden)
+    before, created = before_bodies(sorted(targets), targets)
+    return settle_hidden(hidden, before, created), before
+
+
+async def main_async(case_ids: list[str]) -> None:
+    root = get_settings().ontology_dir
+    data, concepts, definitions = load_ontology()
     data_nodes = {n["id"]: n for n in data["nodes"]}
     out_dir = root / "검증"
     out_dir.mkdir(exist_ok=True)
     for case_id in case_ids:
-        hidden, changed = hidden_for(data, case_id)
-        targets = change_targets(data, hidden)
-        before, created = before_bodies(sorted(targets), targets)
-        hidden = settle_hidden(hidden, before, created)
+        _, changed = hidden_for(data, case_id)
+        hidden, before = hide_case_work(data, case_id)
         view = OntologyView(data, concepts, definitions, hidden, before)
-        log.info("trial %s: before %d, created %d", case_id, len(before), len(created))
-        log.info("trial %s: hidden %d, changed %d", case_id, len(hidden), len(changed))
+        log.info(
+            "trial %s: hidden %d, before %d, changed %d",
+            case_id,
+            len(hidden),
+            len(before),
+            len(changed),
+        )
         result, calls, status = await run_trial(view, case_id, turn_cutoff(data, case_id))
         text, score = report(
             data_nodes[case_id], data_nodes, hidden, changed, result, calls, status
