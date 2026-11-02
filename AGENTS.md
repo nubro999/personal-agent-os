@@ -37,7 +37,8 @@
 
 ## Known decisions
 - UI: http://localhost:8000 한 앱에 보드, 그래프, 채팅 탭. 채팅은 assistant-ui, 그래프는 react-force-graph-2d, 스타일은 Tailwind. upstream Agent Chat UI는 쓰지 않는다.
-- 그래프 API(`/api/graph`)는 `nodes`, `links` 형식이다. 지금은 Task, 프로젝트, 출처를 내주고, 온톨로지가 생기면 같은 형식으로 내준다.
+- 그래프 탭은 Task 현황이 아니라 회사 온톨로지를 이해하는 개념 지도다. 노드는 개념, 링크는 이름 있는 관계이고 사례는 눌렀을 때 펼친다.
+- 온톨로지 자료는 회사 자료라 이 저장소에 두지 않는다. `PAO_ONTOLOGY_DIR`(기본 `~/glab/glab_mt/_ontology`)의 `concepts/*.md`와 `verbs.yaml`이 정본이고 코드(`app/ontology`)만 여기 있다. 관계 이름은 사전의 영어 동사만 쓴다.
 - 알림: Slack 봇은 보류. 브리핑은 채팅과 Windows 알림으로 전달한다.
 - LLM provider는 설정으로 교체 가능. 첫 provider는 Claude Agent SDK(개인 Claude Max 구독 로그인)이고 회사 업무 트래킹에도 쓴다. 혼자 쓰는 로컬 용도로만 쓰고, 다른 사람에게 제공하거나 클라우드에 배포하려면 API 키 provider로 바꾼다.
 - Temporal은 초기 의존성 아님.

@@ -94,32 +94,6 @@ async def test_dismiss_suggestion_keeps_task(client: AsyncClient, owner: str) ->
     assert (task["status"], task["suggestion"]) == ("todo", None)
 
 
-async def test_graph_links_tasks_to_project_and_source(client: AsyncClient, owner: str) -> None:
-    async with get_sessionmaker().begin() as session:
-        await create_task(
-            session,
-            owner_id=owner,
-            request_id="a",
-            actor="t",
-            new=NewTask(title=Evidence("보고서", "explicit"), project=Evidence("2325", "explicit")),
-        )
-        await create_task(
-            session,
-            owner_id=owner,
-            request_id="b",
-            actor="t",
-            new=NewTask(title=Evidence("회의록", "explicit"), project=Evidence("2325", "explicit")),
-        )
-
-    graph = (await client.get("/api/graph")).json()
-
-    kinds = sorted(n["kind"] for n in graph["nodes"])
-    assert kinds == ["project", "source", "task", "task"]
-    assert len(graph["links"]) == 4
-    ids = {n["id"] for n in graph["nodes"]}
-    assert all(link["source"] in ids and link["target"] in ids for link in graph["links"])
-
-
 async def test_spa_serves_index_for_app_routes_but_not_unknown_api(
     client: AsyncClient, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:

@@ -79,6 +79,10 @@ infra/systemd/install.sh   # 아래 서비스와 타이머 전부 등록
 - 로그: `journalctl --user -u pao-agent -f`, `journalctl --user -u pao-tracker -n 50`
 - 수집기 수동 실행: `cd backend && uv run python -m app.trackers` (하나만: `app.trackers.maintenance`, `app.trackers.slack`, `app.trackers.claude_code`)
 
+## 온톨로지 그래프
+
+그래프 탭은 회사 온톨로지를 이해하는 개념 지도다. 자료는 `~/glab/glab_mt/_ontology/`에 있고 쓰는 법은 그 폴더의 README를 본다. 사례 다시 뽑기: `cd backend && uv run python -m app.ontology.build`
+
 ## 업무 자동 트래킹 (Claude Code 세션)
 
 `~/.claude/projects/*/*.jsonl` 중 사람이 직접 쓴 세션(Claude Desktop, CLI)만 읽는다. 자동화 실행(sdk)은 건너뛴다.

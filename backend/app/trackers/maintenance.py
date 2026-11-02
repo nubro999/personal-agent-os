@@ -93,7 +93,7 @@ class MaintItem:
         return f"{self.human_id} {summary}".strip() or self.item_key
 
 
-def _connect(env: dict[str, str | None], port: int) -> "pymysql.Connection[Any]":
+def connect(env: dict[str, str | None], port: int) -> "pymysql.Connection[Any]":
     """전용 터널이 재시작 중일 수 있어 몇 번 더 시도한다."""
     for attempt in range(CONNECT_ATTEMPTS):
         try:
@@ -114,7 +114,7 @@ def _connect(env: dict[str, str | None], port: int) -> "pymysql.Connection[Any]"
 
 
 def fetch_items(env_file: Path, assignee: str, port: int) -> list[MaintItem]:
-    conn = _connect(dotenv_values(env_file), port)
+    conn = connect(dotenv_values(env_file), port)
     try:
         with conn.cursor(pymysql.cursors.DictCursor) as cur:
             cur.execute(QUERY, (assignee,))

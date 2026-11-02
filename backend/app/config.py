@@ -34,6 +34,9 @@ class Settings(BaseSettings):
     # 한 번 실행에 만드는 답변 초안 수. Claude 호출 수를 묶어 둔다.
     slack_draft_limit: int = 5
     briefing_dir: Path = Path("~/.local/state/personal-agent-os/briefings")
+    # 온톨로지. 회사 자료라 이 저장소가 아니라 glab_mt 쪽에 둔다.
+    ontology_dir: Path = Path("~/glab/glab_mt/_ontology")
+    brand_context_dir: Path = Path("~/glab/glab_mt/auto_cs_maintenance/brands/context")
     web_dist_dir: Path = Path(__file__).resolve().parents[2] / "frontend" / "dist"
     toast_script: str = (
         r"\\wsl.localhost\Ubuntu\home\nubroo\projects\personal-agent-os"
@@ -42,7 +45,13 @@ class Settings(BaseSettings):
     powershell_path: str = "/mnt/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe"
 
     @field_validator(
-        "claude_projects_dir", "maint_env_file", "slack_token_file", "briefing_dir", mode="after"
+        "ontology_dir",
+        "brand_context_dir",
+        "claude_projects_dir",
+        "maint_env_file",
+        "slack_token_file",
+        "briefing_dir",
+        mode="after",
     )
     @classmethod
     def _expand_home(cls, value: Path) -> Path:

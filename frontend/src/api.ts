@@ -18,16 +18,45 @@ export type Draft = {
   slack_url: string;
 };
 
-export type GraphNode = {
+export type Concept = {
   id: string;
-  label: string;
-  kind: "task" | "project" | "source";
-  status: string | null;
-  detail: string | null;
+  name: string;
+  group: string;
+  tier: number;
+  key: string;
+  owner: string;
+  count: number;
 };
 
-export type GraphLink = { source: string; target: string; kind: string };
-export type Graph = { nodes: GraphNode[]; links: GraphLink[] };
+export type ConceptDetail = Concept & { body: string };
+
+export type Relation = {
+  source: string;
+  target: string;
+  name: string;
+  confidence: string;
+  basis: string;
+};
+
+export type Overview = {
+  concepts: Concept[];
+  relations: Relation[];
+  verbs: Record<string, string>;
+  generated_at: string | null;
+};
+
+export type InstanceNode = {
+  id: string;
+  label: string;
+  concept: string;
+  detail: string;
+  source: string;
+  degree: number;
+  real_key: string;
+};
+
+export type InstanceLink = { source: string; target: string; name: string; confidence: string };
+export type Expansion = { nodes: InstanceNode[]; links: InstanceLink[]; total: number };
 
 async function json<T>(response: Response): Promise<T> {
   if (!response.ok) throw new Error(`요청 실패 (${response.status})`);
@@ -36,7 +65,18 @@ async function json<T>(response: Response): Promise<T> {
 
 export const getTasks = () => fetch("/api/tasks").then(json<Task[]>);
 export const getDrafts = () => fetch("/api/drafts").then(json<Draft[]>);
-export const getGraph = () => fetch("/api/graph").then(json<Graph>);
+export const getOverview = () => fetch("/api/ontology").then(json<Overview>);
+export const getConcept = (id: string) =>
+  fetch(`/api/ontology/concepts/${id}`).then(json<ConceptDetail>);
+export const getInstances = (concept: string) =>
+  fetch(`/api/ontology/instances?concept=${encodeURIComponent(concept)}`).then(json<Expansion>);
+export const getNeighbors = (id: string) =>
+  fetch(`/api/ontology/neighbors?id=${encodeURIComponent(id)}`).then(json<Expansion>);
+export const getGaps = () =>
+  fetch("/api/ontology/gaps").then((response) => {
+    if (!response.ok) throw new Error(`요청 실패 (${response.status})`);
+    return response.text();
+  });
 
 export const completeTask = (task: Task) =>
   fetch(`/api/tasks/${task.id}/status`, {
