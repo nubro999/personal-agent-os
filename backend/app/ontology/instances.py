@@ -45,6 +45,8 @@ class Graph:
     company_bot: dict[int, str] = field(default_factory=dict)
     bot_config: dict[str, str] = field(default_factory=dict)
     unread_chat_dbs: list[str] = field(default_factory=list)
+    # 우리 쪽 사람은 2325 사용자 이름을 알아야 이을 수 있어서 나중에 처리한다.
+    pending_serves: list[tuple[str, str]] = field(default_factory=list)
     measured: dict[str, tuple[int, int]] = field(default_factory=dict)
 
     def measure(self, name: str, hit: int, total: int) -> None:
@@ -131,6 +133,32 @@ def add_brand_map(graph: Graph, path: Path) -> tuple[BrandIndex, BrandIndex]:
         if child in graph.nodes and parent in graph.nodes:
             graph.link(child, parent, "belongs_to")
     return brands, customers
+
+
+def customer_of(graph: Graph, brand: str) -> str | None:
+    for source, target, name in graph.links:
+        if source == brand and name == "belongs_to" and target.startswith("customer:"):
+            return target
+    return None
+
+
+def add_people(graph: Graph, people: Any, customer: str | None, source: str) -> None:
+    """communication.people를 담당자로 올린다. client는 고객사 담당자, ours는 우리 쪽 사람이다."""
+    if not isinstance(people, dict) or customer is None:
+        return
+    company = graph.nodes[customer].label
+    for person in people.get("client") or []:
+        name = (person.get("name") or "").strip() if isinstance(person, dict) else ""
+        if not name:
+            continue
+        node = graph.add(
+            Node(f"contact:{company}:{name}", name, "contact", _short(person.get("role")), source)
+        )
+        graph.link(node, customer, "works_for")
+    for person in people.get("ours") or []:
+        name = (person.get("name") or "").strip() if isinstance(person, dict) else ""
+        if name:
+            graph.pending_serves.append((name, customer))
 
 
 def _step(graph: Graph, bot: str, category: str, number: Any, label: str = "") -> str:
@@ -234,6 +262,12 @@ def add_brand_context(
                 )
                 graph.link(node, customer_node, "applies_to")
                 common_policies[policy["id"]] = node
+            add_people(
+                graph,
+                (common_data.get("communication") or {}).get("people"),
+                customer_node,
+                f"brands/context/{customer_dir.name}/공통.json",
+            )
         for policy_file in sorted(customer_dir.glob("*/정책.json")):
             bot = policy_file.parent.name
             data = _read(policy_file)
@@ -266,6 +300,12 @@ def add_brand_context(
             )
             graph.link(config, brand, "configures")
             configs[bot] = config
+            add_people(
+                graph,
+                (data.get("communication") or {}).get("people"),
+                customer_node or customer_of(graph, brand),
+                f"{source}/정책.json",
+            )
             graph.db_brand[db_name] = brand
             graph.db_bots.setdefault(db_name, []).append(bot)
             graph.bot_config[bot] = config
@@ -332,6 +372,9 @@ def add_s3_context(graph: Graph, context_root: Path, configs: dict[str, str]) ->
             payload = _read(path).get("payload") or {}
             bodies.append((payload.get("doc_type"), payload.get("body") or {}))
         for doc_type, body in bodies:
+            if doc_type == "brand":
+                customer = customer_of(graph, f"brand:{brand_id}")
+                add_people(graph, body.get("people"), customer, source)
             if doc_type == "info":
                 name = (body.get("name") or "").strip()
                 if name:

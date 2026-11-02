@@ -14,14 +14,16 @@ from dotenv import dotenv_values
 from app.trackers.maintenance import connect
 
 TEXT = 240
+# 건 원문은 에이전트가 고객사 요구를 끝까지 읽어야 해서 길게 가져온다.
+FEEDBACK = 4000
 
 QUERIES = {
     "users": "SELECT id, name FROM user",
     "cases": f"""
         SELECT item_key, human_id, brand_id, db_name, company, status_group,
-               LEFT(feedback, {TEXT}) AS feedback FROM wi_ax_item""",
+               LEFT(feedback, {FEEDBACK}) AS feedback FROM wi_ax_item""",
     "adhoc": f"""
-        SELECT item_key, brand, company, LEFT(issue, {TEXT}) AS issue FROM rnd_adhoc_request""",
+        SELECT item_key, brand, company, LEFT(issue, {FEEDBACK}) AS issue FROM rnd_adhoc_request""",
     "assignments": """
         SELECT m.item_key, a.name FROM maintenance_assignment m
         JOIN assignee a ON a.id = m.assignee_id""",

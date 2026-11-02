@@ -5,9 +5,18 @@ from typing import Any
 
 from app.ontology.instances import BrandIndex, Graph, Node, _short
 
+FEEDBACK_LIMIT = 4000
+
+
+def _full(value: Any) -> str:
+    return str(value or "").strip()[:FEEDBACK_LIMIT]
+
+
 Rows = dict[str, list[dict[str, Any]]]
 SOURCE = "2325"
 _TARGET_CONCEPT = {"카테고리": "category", "정보": "info"}
+# 담당자 칸에 들어가지만 팀이 아닌 이름
+NOT_TEAMS = frozenset({"기타"})
 
 
 def _case_label(row: dict[str, Any]) -> str:
@@ -20,6 +29,13 @@ def _add_users(graph: Graph, rows: Rows) -> dict[str, str]:
         by_name[row["name"]] = graph.add(
             Node(f"user:{row['id']}", row["name"], "user", source="2325 user")
         )
+    served = 0
+    for name, customer in graph.pending_serves:
+        user = by_name.get(name)
+        if user:
+            graph.link(user, customer, "serves")
+            served += 1
+    graph.measure("우리 쪽 담당 → 사용자", served, len(graph.pending_serves))
     return by_name
 
 
@@ -67,7 +83,7 @@ def _add_cases(
                 f"case:{row['item_key']}",
                 _case_label(row),
                 "case",
-                _short(row.get("feedback")),
+                _full(row.get("feedback")),
                 "2325 wi_ax_item",
             )
         )
@@ -82,7 +98,7 @@ def _add_cases(
                 f"case:{row['item_key']}",
                 f"수동 요청 {row.get('company') or row['item_key']}",
                 "case",
-                _short(row.get("issue")),
+                _full(row.get("issue")),
                 "2325 rnd_adhoc_request",
             )
         )
@@ -91,12 +107,17 @@ def _add_cases(
             graph.link(case, brand, "targets")
     hit = 0
     for row in rows["assignments"]:
-        user = users.get(row["name"])
-        case = f"case:{row['item_key']}"
-        if user and case in graph.nodes:
+        name, case = row["name"], f"case:{row['item_key']}"
+        if case not in graph.nodes:
+            continue
+        user = users.get(name)
+        if user is None and name not in NOT_TEAMS:
+            # 사람이 아닌 담당자 이름은 팀이다(플랫폼, 툴콜, 모듈 등).
+            user = graph.add(Node(f"team:{name}", name, "team", source="2325 assignee"))
+        if user:
             graph.link(case, user, "assigned_to")
             hit += 1
-    graph.measure("담당 → 사용자", hit, len(rows["assignments"]))
+    graph.measure("담당 → 사용자, 팀", hit, len(rows["assignments"]))
 
 
 def _add_runs(graph: Graph, rows: Rows) -> None:

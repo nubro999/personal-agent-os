@@ -19,7 +19,9 @@ from app.config import get_settings
 from app.ontology.concepts import Concept, load_concepts, load_verbs
 from app.ontology.instances import Graph, add_brand_context, add_brand_map, add_s3_context
 from app.ontology.instances_2325 import add_2325
+from app.ontology.instances_admin import add_admin
 from app.ontology.instances_chat import add_chat
+from app.ontology.instances_fields import add_fields
 from app.ontology.source_2325 import fetch_rows
 from app.ontology.source_chat import fetch_chat
 
@@ -51,6 +53,9 @@ def build(
     overmind = ontology_dir / "source" / "overmind"
     brands, customers = add_brand_map(graph, overmind / "index" / "brand-map.json")
     configs = add_brand_context(graph, brand_context, brands, customers)
+    # 운영 설정이 이름과 본문의 정본이라 다른 출처보다 먼저 읽는다.
+    add_admin(graph, ontology_dir / "source" / "admin")
+    add_fields(graph, ontology_dir / "source" / "fields", brand_context)
     add_s3_context(graph, overmind / "context", configs)
     if rows_2325:
         add_2325(graph, rows_2325, brands, customers)

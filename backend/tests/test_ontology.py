@@ -42,16 +42,23 @@ RELATIONS: dict[str, list[tuple[str, str, str, str]]] = {
         ("info", "uses", "추정", "약함"),
         ("step", "next", "확정", "표"),
         ("policy", "implements", "확정", "표"),
+        ("ment", "uses", "확정", "표"),
+        ("function", "invokes", "추정", "표"),
     ],
+    "ment": [("bot_config", "belongs_to", "확정", "표")],
+    "response_field": [("function", "belongs_to", "확정", "표")],
     "decision_point": [
         ("category", "belongs_to", "확정", "표"),
         ("step", "located_at", "추정", "표"),
         ("policy", "justified_by", "확정", "표"),
     ],
+    "contact": [("customer", "works_for", "확정", "표")],
+    "user": [("customer", "serves", "확정", "표")],
     "case": [
         ("brand", "targets", "확정", "표"),
         ("customer", "targets", "확정", "표"),
         ("user", "assigned_to", "확정", "표"),
+        ("team", "assigned_to", "확정", "표"),
         ("conversation", "refers_to", "확정", "표"),
         ("turn", "refers_to", "확정", "표"),
     ],
@@ -101,6 +108,10 @@ NAMES = {
     "promotion": "반영",
     "fix_record": "수정 기록",
     "period_event": "기간 이벤트",
+    "contact": "고객사 담당자",
+    "ment": "멘트",
+    "response_field": "응답 칸",
+    "team": "팀",
     "conversation": "대화",
     "turn": "턴",
     "tool_call": "함수 호출",
@@ -163,6 +174,24 @@ def ontology(tmp_path: Path) -> tuple[Path, Path]:
             "company_id": 240,
             "channel": "chat",
             "policies": [{"id": "P01", "name": "자가조치 1회", "rule": "한 번만 안내"}],
+            "glossary": {
+                "states": [
+                    {
+                        "field": "반송수령일자",
+                        "value": "날짜",
+                        "function": "get_return",
+                        "meaning": "택배 배달 완료일",
+                        "handling": "입고일로 읽지 않는다",
+                    },
+                    {"field": "없는칸", "value": "x", "meaning": "y"},
+                ]
+            },
+            "communication": {
+                "people": {
+                    "client": [{"name": "안정현", "role": "CS팀장"}],
+                    "ours": [{"name": "신형섭"}, {"name": "외부인"}],
+                }
+            },
         },
     )
     write_json(
@@ -319,6 +348,7 @@ def rows_2325() -> dict[str, list[dict[str, object]]]:
         "assignments": [
             {"item_key": "Xcs_1", "name": "신형섭"},
             {"item_key": "Xcs_1", "name": "플랫폼"},
+            {"item_key": "Xcs_1", "name": "기타"},
         ],
         "runs": [
             {
@@ -407,7 +437,12 @@ def test_2325_rows_become_linked_instances(ontology: tuple[Path, Path]) -> None:
     assert nodes["diagnosis:r1"]["label"] == "멘트 줄바꿈이 벌어졌다"
     assert "| 건 → 브랜드, 고객사 | 2 | 3 | 67% |" in gaps
     assert "| 실행 → 건 | 1 | 2 | 50% |" in gaps
-    assert "| 담당 → 사용자 | 1 | 2 | 50% |" in gaps
+    assert "| 담당 → 사용자, 팀 | 2 | 3 | 67% |" in gaps
+    assert ("case:Xcs_1", "assigned_to", "team:플랫폼") in links
+    assert "team:기타" not in nodes
+    assert ("contact:오아주식회사:안정현", "works_for", "customer:b_OA") in links
+    assert ("user:1", "serves", "customer:b_OA") in links
+    assert "| 우리 쪽 담당 → 사용자 | 1 | 2 | 50% |" in gaps
     assert "| 변경 항목 → 카테고리, 정보 | 2 | 2 | 100% |" in gaps
 
 
@@ -538,3 +573,114 @@ def test_chat_rows_prove_what_a_turn_actually_did(ontology: tuple[Path, Path]) -
     assert "| 턴 → 고른 매뉴얼 판정 있음 | 1 | 2 | 50% |" in gaps
     assert "| 건 → 문제 턴 인용 근거 | 1 | 2 | 50% |" in gaps
     assert "carmore_v2 (읽기 실패 1146)" in gaps
+
+
+def node(
+    kind: str, uuid: str, data: dict[str, object], *kids: dict[str, object]
+) -> dict[str, object]:
+    return {"type": kind, "uuid": uuid, "data": data, "children": {"": list(kids)}}
+
+
+def config_tree() -> dict[str, object]:
+    step2 = node(
+        "step.regular",
+        "s2",
+        {"uid": "s2", "step": 2},
+        node("goal.정보제공", "g", {"pattern": "정보제공", "description": "AS 기간을 안내"}),
+        node(
+            "action.정보제공",
+            "a",
+            {"structure": "단순안내"},
+            node("ref.info", "r1", {"ref_id": "i1", "identifier": "[AS 기간]"}),
+            node("ref.ment_strong", "r2", {"ref_id": "m-alias", "identifier": "[접수 멘트]"}),
+            node("function_ref", "f", {"value": "get_order_info"}),
+        ),
+        node("exception", "e", {"goto": 999, "condition": "고객이 다시 물음"}),
+    )
+    step1 = node(
+        "step.branch",
+        "s1",
+        {"uid": "s1", "step": 1},
+        node(
+            "branch_case",
+            "b",
+            {"goto": 2, "condition": "AS 기간 문의", "$link": {"goto": {"to": "s2"}}},
+        ),
+    )
+    manual = node("channel_manual", "cm", {"channelName": "chat"}, step1, step2)
+    category = node(
+        "category", "c", {"category": "A/S정책문의", "manualDescription": "AS 정책"}, manual
+    )
+    return {
+        "schema": "config_tree",
+        "companyId": 240,
+        "root": node(
+            "company",
+            "root",
+            {},
+            node("big_category", "big", {"name": "A/S문의"}, category),
+            node(
+                "info_scope", "is", {}, node("info", "i1", {"tag": "[AS 기간]", "content": "1년"})
+            ),
+            node(
+                "ment_scope",
+                "ms",
+                {},
+                node(
+                    "ment",
+                    "m1",
+                    {"tag": "[접수 멘트]", "content": "접수했어요", "$aliases": ["m1", "m-alias"]},
+                ),
+            ),
+        ),
+    }
+
+
+def test_config_tree_gives_content_real_keys_and_step_links(ontology: tuple[Path, Path]) -> None:
+    root, context = ontology
+    write_json(root / "source/admin/240_prod.json", config_tree())
+
+    data, gaps = build(root, context)
+
+    nodes = {n["id"]: n for n in data["nodes"]}
+    links = {(x["source"], x["name"], x["target"]) for x in data["links"]}
+    step1, step2 = "step:oa_v2:A/S문의 - A/S정책문의:1", "step:oa_v2:A/S문의 - A/S정책문의:2"
+    assert (step1, "next", step2) in links
+    assert (step2, "uses", "info:oa_v2:[AS 기간]") in links
+    # 멘트는 별칭 uuid로 참조돼도 같은 멘트로 잇는다.
+    assert (step2, "uses", "ment:oa_v2:[접수 멘트]") in links
+    assert (step2, "invokes", "function:oa_v2:get_order_info") in links
+    assert ("ment:oa_v2:[접수 멘트]", "belongs_to", "bot_config:240") in links
+    assert nodes["info:oa_v2:[AS 기간]"]["detail"] == "1년"
+    assert nodes["info:oa_v2:[AS 기간]"]["real_key"] == "i1"
+    assert nodes[step2]["real_key"] == "s2"
+    assert "AS 기간을 안내" in nodes[step2]["detail"] and "→ step999" in nodes[step2]["detail"]
+    assert "| 봇 구성 → config_tree | 1 | 1 | 100% |" in gaps
+
+
+def test_response_fields_carry_code_meaning_and_glossary(ontology: tuple[Path, Path]) -> None:
+    root, context = ontology
+    write_json(
+        root / "source/fields/oa_v2.json",
+        {
+            "get_return": [
+                {
+                    "field": "반송수령일자",
+                    "type": "str | None",
+                    "doc": "반송 배송 완료 시에만 존재",
+                    "code": [{"text": "반송수령일자=tracking.delivered_on"}],
+                }
+            ]
+        },
+    )
+
+    data, gaps = build(root, context)
+
+    nodes = {n["id"]: n for n in data["nodes"]}
+    field = "response_field:oa_v2:get_return:반송수령일자"
+    links = {(x["source"], x["name"], x["target"]) for x in data["links"]}
+    assert (field, "belongs_to", "function:oa_v2:get_return") in links
+    detail = nodes[field]["detail"]
+    assert "delivered_on" in detail and "반송 배송 완료 시에만" in detail
+    assert "값 날짜: 택배 배달 완료일 / 처리: 입고일로 읽지 않는다" in detail
+    assert "| 상태 사전 값 → 응답 칸 | 1 | 2 | 50% |" in gaps
