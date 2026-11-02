@@ -34,6 +34,7 @@ class Settings(BaseSettings):
     # 한 번 실행에 만드는 답변 초안 수. Claude 호출 수를 묶어 둔다.
     slack_draft_limit: int = 5
     briefing_dir: Path = Path("~/.local/state/personal-agent-os/briefings")
+    web_dist_dir: Path = Path(__file__).resolve().parents[2] / "frontend" / "dist"
     toast_script: str = (
         r"\\wsl.localhost\Ubuntu\home\nubroo\projects\personal-agent-os"
         r"\infra\windows\toast.ps1"

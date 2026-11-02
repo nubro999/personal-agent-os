@@ -6,7 +6,7 @@
 
 ## 결정된 방향
 
-- **Frontend:** 보드와 채팅이 한 화면에 있는 단일 페이지 (FastAPI가 내줌, 외부 패키지 없음)
+- **Frontend:** Vite, React, TypeScript 앱 한 개 (보드, 그래프, 채팅). assistant-ui, react-force-graph-2d, Tailwind. 빌드 결과를 FastAPI가 내준다.
 - **Agent runtime:** Python + LangGraph
 - **API:** FastAPI
 - **Storage:** PostgreSQL, SQLAlchemy, Alembic
@@ -69,7 +69,7 @@ infra/systemd/install.sh   # 아래 서비스와 타이머 전부 등록
 ```
 
 - `pao-agent`: LangGraph 서버 (localhost:2024). 대화 기록은 `backend/.langgraph_api/`에 남는다.
-- `pao-api`: 보드 화면과 Task API (localhost:8000). 인증이 없어서 127.0.0.1에만 띄운다.
+- `pao-api`: 앱 화면과 API (localhost:8000). 인증이 없어서 127.0.0.1에만 띄운다.
 - `pao-2325-tunnel`: 2325 DB 전용 터널 (127.0.0.1:13316). `run.sh`와 따로 돈다.
 - `pao-tracker.timer`: 30분마다 2325, Slack, Claude Code, 정리. 결과는 `tracker_runs`에 남고 실패는 브리핑에 나온다.
 - `pao-briefing.timer`: 낮 12시 브리핑 (`~/.local/state/personal-agent-os/briefings/`, Windows 알림). 시각을 바꾸려면 유닛의 `OnCalendar`를 고친다.
@@ -105,7 +105,13 @@ infra/systemd/install.sh   # 아래 서비스와 타이머 전부 등록
 - 내 차례인 요청에는 답변 초안을 만들어 보드 맨 위에 보여 준다. 고쳐서 복사하고 Slack에서 직접 보낸다. 시스템은 보내지 않는다. 내가 답하면 초안은 사라지고, 모르는 내용은 `[확인 필요: ...]`로 남는다.
 - DM과 그룹 DM은 내 마지막 메시지 뒤에 상대 메시지가 있으면 내 차례로 본다. 답하지 않은 메시지 묶음 하나가 Task 하나다. 봇과 Slackbot은 건너뛰고, 잡담이나 공유만 있는 대화는 Task를 만들지 않는다.
 
-화면은 http://localhost:8000 이다. 브라우저에서 "앱으로 설치"하면 따로 창으로 뜬다.
+화면은 http://localhost:8000 이다. 탭은 보드(`#board`), 그래프(`#graph`), 채팅(`#chat`)이고, 브라우저에서 "앱으로 설치"하면 따로 창으로 뜬다.
+
+프런트엔드를 고친 뒤에는 다시 빌드한다. 서비스 재시작은 필요 없다.
+
+```bash
+cd frontend && pnpm install && pnpm build
+```
 
 LLM은 Claude Agent SDK로 로그인된 Claude Code 인증(개인 Claude Max 구독)을 쓴다. 혼자 쓰는 로컬 용도로만 쓴다. 사용량은 claude.ai, Claude Code와 같은 한도를 나눠 쓴다. 모델은 `PAO_LLM_MODEL`(기본 `claude-sonnet-5-5`).
 

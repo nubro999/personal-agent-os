@@ -1,5 +1,6 @@
 import uuid
 from collections.abc import Iterator
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -93,12 +94,44 @@ async def test_dismiss_suggestion_keeps_task(client: AsyncClient, owner: str) ->
     assert (task["status"], task["suggestion"]) == ("todo", None)
 
 
-async def test_serves_app_page_and_manifest(client: AsyncClient) -> None:
-    page = await client.get("/")
-    manifest = await client.get("/manifest.webmanifest")
+async def test_graph_links_tasks_to_project_and_source(client: AsyncClient, owner: str) -> None:
+    async with get_sessionmaker().begin() as session:
+        await create_task(
+            session,
+            owner_id=owner,
+            request_id="a",
+            actor="t",
+            new=NewTask(title=Evidence("보고서", "explicit"), project=Evidence("2325", "explicit")),
+        )
+        await create_task(
+            session,
+            owner_id=owner,
+            request_id="b",
+            actor="t",
+            new=NewTask(title=Evidence("회의록", "explicit"), project=Evidence("2325", "explicit")),
+        )
 
-    assert page.status_code == 200 and "<title>Personal OS</title>" in page.text
-    assert manifest.json()["start_url"] == "/"
+    graph = (await client.get("/api/graph")).json()
+
+    kinds = sorted(n["kind"] for n in graph["nodes"])
+    assert kinds == ["project", "source", "task", "task"]
+    assert len(graph["links"]) == 4
+    ids = {n["id"] for n in graph["nodes"]}
+    assert all(link["source"] in ids and link["target"] in ids for link in graph["links"])
+
+
+async def test_spa_serves_index_for_app_routes_but_not_unknown_api(
+    client: AsyncClient, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    (tmp_path / "index.html").write_text("<title>Personal OS</title>")
+    (tmp_path / "icon.svg").write_text("<svg/>")
+    monkeypatch.setattr(get_settings(), "web_dist_dir", tmp_path)
+
+    assert "Personal OS" in (await client.get("/")).text
+    assert "Personal OS" in (await client.get("/graph")).text
+    assert (await client.get("/icon.svg")).text == "<svg/>"
+    assert (await client.get("/api/nope")).status_code == 404
+    assert "Personal OS" in (await client.get("/..%2f..%2fetc%2fpasswd")).text
 
 
 async def test_lists_and_dismisses_drafts(client: AsyncClient, owner: str) -> None:

@@ -17,9 +17,9 @@ MVP에서 FastAPI는 Task CRUD와 인증된 실행/조회 엔드포인트를 제
 ## Modules
 ```text
 personal-agent-os/
+├── frontend/              # Vite + React 앱: 보드, 그래프, 채팅
 ├── backend/
-│   ├── app/web/           # 보드와 채팅 단일 페이지
-│   ├── app/api/           # FastAPI, health/task/web routes
+│   ├── app/api/           # FastAPI, health/task/graph routes, 빌드 결과 서빙
 │   ├── app/agents/task/   # LangGraph nodes, state, prompts
 │   ├── app/domain/tasks/  # Entity, validation, transition service
 │   ├── app/persistence/   # SQLAlchemy, Alembic, repositories
@@ -37,7 +37,7 @@ personal-agent-os/
 | Task Domain Service | CRUD invariants, status transitions, idempotency, audit trail | prompting and model calls |
 | PostgreSQL | tasks, field evidence, task events, relationships, checkpoints | company-wide knowledge |
 | Overmind Adapter | authorized read of company context | personal Task source of truth |
-| 웹 페이지 (app/web) | 보드, 채팅, 완료와 제안 거절 | direct DB writes |
+| 프런트엔드 (frontend/) | 보드, 그래프, 채팅, 완료와 제안 거절 | direct DB writes |
 | Temporal (future) | long-lived external workflows and retry orchestration | agent reasoning |
 
 ## Workflow design

@@ -8,7 +8,7 @@ AGENTS.md의 "First delivery"를 순서대로 쪼갠 것. 구현 순서는 DB sc
 | 2 | Task Domain Service: 생성(요청 멱등성), 조회, 수정(낙관적 동시성), 완료/재오픈, 이벤트와 근거를 한 트랜잭션에 기록 | 완료 (2026-10-30) |
 | 3 | Task API (FastAPI): 목록, 상태 변경, 제안 거절. owner는 설정값, request_id는 클라이언트 envelope | 완료 (2026-10-30). 인증은 없고 127.0.0.1 전용 |
 | 4 | LangGraph Task workflow: parse, extract, resolve, validate, clarify(`interrupt()`), persist/read. Postgres checkpointer | 동작: parse(대상 후보 포함), create, read, mutate, reply. 되묻기는 대화로 처리, `interrupt()`와 영속 checkpointer는 아직 |
-| 5 | 화면 | 완료: 자체 단일 페이지(보드, 채팅). 페이지가 FastAPI(8000)와 LangGraph(2024)를 각각 부른다 |
+| 5 | 화면 | 완료: `frontend/` React 앱(보드, 그래프, 채팅). 보드와 그래프는 FastAPI(8000), 채팅은 LangGraph(2024)를 부른다 |
 | 6 | 자동 실행: Postgres restart 정책, systemd 사용자 유닛(에이전트, 수집기 타이머), Windows 로그인 때 WSL 깨우기 | 완료 (Windows 작업은 스크립트만, 직접 실행 필요) |
 | 7 | 업무 자동 트래킹 1: Claude Code 세션 수집기 | 완료 (2026-10-30) |
 | 8 | 업무 자동 트래킹 2: 2325 수집기 | 완료 (2026-10-30) |
@@ -70,10 +70,12 @@ AGENTS.md의 "First delivery"를 순서대로 쪼갠 것. 구현 순서는 DB sc
 - 새 메시지가 오면 초안을 다시 만들고, 내가 답하면 `used`로 치운다.
 - 초안 품질에 대한 사람의 평가는 아직 없다. 임시 owner로 2건을 눈으로 봤다.
 
-## 웹 화면 (2026-10-30)
-- upstream Agent Chat UI를 `frontend/`에 넣으려 했지만 외부 코드의 `pnpm install`이 권한 확인에서 막혔다. 외부 패키지 없는 단일 페이지로 바꿨다. `app/web/index.html` 하나다.
-- 화면과 버튼 동작은 사용자가 브라우저에서 확인했다 (2026-10-30).
-- 브리핑 알림은 일반 토스트가 눈에 띄지 않아 닫을 때까지 남는 reminder 방식으로 바꿨고, 사용자가 표시를 확인했다.
+## 웹 앱 (2026-11-02)
+- 단일 HTML 페이지를 `frontend/` React 앱으로 바꿨다. 탭은 보드, 그래프, 채팅이고 URL 해시로 고른다.
+- 보드: 답변 초안, 끝난 것 같은 일, 진행 중, 할 일, 고객 답 대기. 찾기 칸이 있다. 스타일은 shadcn/ui 없이 Tailwind로 직접 썼다.
+- 그래프: `react-force-graph-2d`. 호버와 클릭으로 연결 노드 강조, 옆 패널, 찾기, 종류별 끄기. 데이터는 아직 온톨로지가 아니라 열린 Task, 프로젝트, 출처다.
+- 채팅: `assistant-ui` + LangGraph 런타임. 노드가 완성된 메시지를 돌려주므로 `streamMode: values`를 쓴다. 스레드 id는 브라우저에 저장한다. 대화 목록과 마크다운 렌더링은 아직 없다.
+- 확인: headless Edge로 보드와 그래프 화면을 찍어 봤고, 채팅은 "브리핑"을 실제로 보내 19초 만에 답이 표시됐다. 버튼을 사람이 눌러 본 것은 예전 페이지 기준이다.
 
 ## 테스트로 확인하는 것 (1단계)
 - 같은 owner의 같은 `request_id`로 Task 두 개를 만들 수 없다. owner가 다르면 된다.
