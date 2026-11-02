@@ -6,6 +6,9 @@
 config_tree는 지금 운영 설정이라 그 건을 고친 뒤의 내용이다. 고친 대상은 2325 변경 항목의
 고치기 전 본문(before_body)으로 바꿔 보여 주고, 고치며 새로 만든 정보는 숨긴다.
 
+턴 원문, 서빙 프롬프트, 함수 로그는 회사 도구로 그때 읽는다. 문제 턴보다 뒤의 턴은 고친 뒤
+매뉴얼로 답했을 수 있어 읽지 못하게 한다.
+
 실행: uv run python -m app.ontology.trial case:Xcs_... [case:Xcs_...]
 결과: <PAO_ONTOLOGY_DIR>/검증/<날짜>_<건>.md
 """
@@ -32,8 +35,8 @@ from dotenv import dotenv_values
 from pydantic import BaseModel, ConfigDict, Field
 
 from app.config import get_settings
+from app.ontology import live
 from app.ontology.concepts import load_concepts, load_verbs
-from app.ontology.live import read_conversation, read_turn
 from app.ontology.prompts import TRIAL_SYSTEM
 from app.trackers.maintenance import connect
 
@@ -211,6 +214,30 @@ def hidden_for(data: dict[str, Any], case_id: str) -> tuple[set[str], set[str]]:
     return hidden, changed
 
 
+def settle_hidden(hidden: set[str], before: dict[str, str], created: set[str]) -> set[str]:
+    """2325 고치기 전 본문이 근거 규칙보다 앞선다.
+
+    고치기 전 본문이 있으면 고치기 전에도 있던 것이라 보여 준다. 고친 뒤 매뉴얼이 그 정보를
+    더는 쓰지 않으면 근거 규칙만으로는 새로 만든 것처럼 보여 숨겨진다. "없다"였으면 숨긴다.
+    """
+    return (hidden - before.keys()) | created
+
+
+def turn_cutoff(data: dict[str, Any], case_id: str) -> dict[str, int]:
+    """브랜드 db -> 그 건이 가리킨 가장 늦은 턴 번호. 이보다 뒤의 턴은 읽지 못하게 한다."""
+    cutoff: dict[str, int] = {}
+    for link in data["links"]:
+        if link["source"] == case_id and link["target"].startswith("turn:"):
+            _, db, number = link["target"].split(":", 2)
+            cutoff[db] = max(cutoff.get(db, 0), int(number))
+    return cutoff
+
+
+def after_cutoff(node_id: str, cutoff: dict[str, int]) -> bool:
+    kind, db, number = node_id.split(":", 2)
+    return kind == "turn" and db in cutoff and number.isdigit() and int(number) > cutoff[db]
+
+
 def before_bodies(
     snapshot_ids: list[int], changed: dict[int, str]
 ) -> tuple[dict[str, str], set[str]]:
@@ -247,9 +274,18 @@ def before_bodies(
     return before, created
 
 
-def _tools(view: OntologyView) -> list[Any]:
+def _tools(view: OntologyView, cutoff: dict[str, int]) -> list[Any]:
     def text(value: Any) -> dict[str, Any]:
         return {"content": [{"type": "text", "text": json.dumps(value, ensure_ascii=False)}]}
+
+    async def read(reader: Any, node_id: str, *args: Any) -> dict[str, Any]:
+        if after_cutoff(node_id, cutoff):
+            return text({"error": "문제 턴보다 뒤의 턴은 이 시험에서 읽을 수 없다"})
+        try:
+            result = await asyncio.to_thread(reader, node_id, *args)
+        except (ValueError, pymysql.err.Error) as exc:
+            result = {"error": str(exc)}
+        return text(result)
 
     @tool("get_node", "사례 하나의 내용과 동사별 이웃 요약을 본다", {"id": str})
     async def get_node(args: dict[str, Any]) -> dict[str, Any]:
@@ -279,55 +315,74 @@ def _tools(view: OntologyView) -> list[Any]:
 
     @tool(
         "read_turn",
-        "턴 하나의 원문을 채팅 DB에서 읽는다. 고객 질문, 봇 답변, 함수 호출 인자와 반환값",
+        "턴 하나를 깊게(chat.turn). 질문, 답변, 생각 과정(고른 매뉴얼, step 진행), 실린 정보, "
+        "함수 호출 인자와 반환값",
         {"id": str},
     )
-    async def read_turn_tool(args: dict[str, Any]) -> dict[str, Any]:
-        return text(await _live(read_turn, args["id"]))
+    async def read_turn(args: dict[str, Any]) -> dict[str, Any]:
+        return await read(live.read_turn, args["id"])
 
     @tool(
         "read_conversation",
-        "대화 하나의 턴들을 순서대로 읽는다. 고객 질문과 봇 답변",
+        "대화 한 방의 턴을 순서대로(chat.conversation). 질문, 답변, 고른 매뉴얼 이름, "
+        "부른 함수 이름",
         {"id": str},
     )
-    async def read_conversation_tool(args: dict[str, Any]) -> dict[str, Any]:
-        return text(await _live(read_conversation, args["id"]))
+    async def read_conversation(args: dict[str, Any]) -> dict[str, Any]:
+        return await read(live.read_conversation, args["id"])
+
+    @tool(
+        "read_prompt",
+        "그 턴에 봇이 실제로 받은 서빙 프롬프트(chat.prompt). section 0이면 목차와 실린 정보 태그, "
+        "n이면 n번 섹션 본문(그때의 매뉴얼, Information 등). 길면 offset으로 이어 읽는다",
+        {"id": str, "section": int, "offset": int},
+    )
+    async def read_prompt(args: dict[str, Any]) -> dict[str, Any]:
+        section, offset = int(args.get("section", 0)), int(args.get("offset", 0))
+        return await read(live.read_prompt, args["id"], section, offset)
+
+    @tool(
+        "read_tool_logs",
+        "그 턴의 함수가 서버에서 무엇을 조회했나(logs.tool_calls, CloudWatch). 외부 API 조회 범위, "
+        "건수, 중간 분기",
+        {"id": str},
+    )
+    async def read_tool_logs(args: dict[str, Any]) -> dict[str, Any]:
+        return await read(live.read_tool_logs, args["id"])
+
+    @tool(
+        "read_api_spec",
+        "함수가 낼 수 있는 응답 코드와 메시지(api.spec, 배포된 openapi). id는 function 사례",
+        {"id": str},
+    )
+    async def read_api_spec(args: dict[str, Any]) -> dict[str, Any]:
+        return await read(live.read_api_spec, args["id"])
 
     return [
         get_node,
         list_neighbors,
         find_nodes,
         describe_concept,
-        read_turn_tool,
-        read_conversation_tool,
+        read_turn,
+        read_conversation,
+        read_prompt,
+        read_tool_logs,
+        read_api_spec,
     ]
 
 
-async def _live(reader: Any, node_id: str) -> dict[str, Any]:
-    try:
-        result: dict[str, Any] = await asyncio.to_thread(reader, node_id)
-    except (ValueError, pymysql.err.Error) as exc:
-        return {"error": str(exc)}
-    return result
-
-
-async def run_trial(view: OntologyView, case_id: str) -> tuple[TrialResult | None, list[str], str]:
-    server = create_sdk_mcp_server("onto", tools=_tools(view))
-    names = [
-        "get_node",
-        "list_neighbors",
-        "find_nodes",
-        "describe_concept",
-        "read_turn",
-        "read_conversation",
-    ]
+async def run_trial(
+    view: OntologyView, case_id: str, cutoff: dict[str, int]
+) -> tuple[TrialResult | None, list[str], str]:
+    tools = _tools(view, cutoff)
+    server = create_sdk_mcp_server("onto", tools=tools)
     options = ClaudeAgentOptions(
         model=MODEL,
         system_prompt=TRIAL_SYSTEM,
         tools=[],
         setting_sources=[],
         mcp_servers={"onto": server},
-        allowed_tools=[f"mcp__onto__{name}" for name in names],
+        allowed_tools=[f"mcp__onto__{t.name}" for t in tools],
         max_turns=MAX_TURNS,
         output_format={"type": "json_schema", "schema": TrialResult.model_json_schema()},
         extra_args={"no-session-persistence": None},
@@ -458,11 +513,11 @@ async def main_async(case_ids: list[str]) -> None:
         hidden, changed = hidden_for(data, case_id)
         targets = change_targets(data, hidden)
         before, created = before_bodies(sorted(targets), targets)
-        hidden |= created
+        hidden = settle_hidden(hidden, before, created)
         view = OntologyView(data, concepts, definitions, hidden, before)
         log.info("trial %s: before %d, created %d", case_id, len(before), len(created))
         log.info("trial %s: hidden %d, changed %d", case_id, len(hidden), len(changed))
-        result, calls, status = await run_trial(view, case_id)
+        result, calls, status = await run_trial(view, case_id, turn_cutoff(data, case_id))
         text, score = report(
             data_nodes[case_id], data_nodes, hidden, changed, result, calls, status
         )

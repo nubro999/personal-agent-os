@@ -9,31 +9,21 @@ api.fields는 genlab-tools(origin/main)의 스펙과 코드에서 칸마다 타�
 
 import json
 import logging
-import subprocess
 from pathlib import Path
 from typing import Any
 
 from app.config import get_settings
+from app.ontology import auto_cs
 
 log = logging.getLogger(__name__)
 
-TIMEOUT = 300
-
 
 def run_fields(auto_cs_dir: Path, *args: str) -> dict[str, Any] | None:
-    result = subprocess.run(
-        ["tools/run", "api.fields", *args],
-        cwd=auto_cs_dir,
-        capture_output=True,
-        text=True,
-        timeout=TIMEOUT,
-        check=False,
-    )
-    try:
-        data: dict[str, Any] = json.loads(result.stdout).get("data") or {}
-    except ValueError:
-        log.warning("api.fields %s: not json", args)
+    result = auto_cs.run(auto_cs_dir, "api.fields", *args)
+    if "error" in result:
+        log.warning("api.fields %s: %s", args, result["error"])
         return None
+    data: dict[str, Any] = result.get("data") or {}
     return data or None
 
 

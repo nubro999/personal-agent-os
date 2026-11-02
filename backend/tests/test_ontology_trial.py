@@ -1,6 +1,12 @@
 from typing import Any
 
-from app.ontology.trial import STEP_HIDDEN, OntologyView, change_targets, hidden_for
+from app.ontology.trial import (
+    STEP_HIDDEN,
+    OntologyView,
+    change_targets,
+    hidden_for,
+    settle_hidden,
+)
 
 
 def graph() -> dict[str, Any]:
@@ -82,3 +88,16 @@ def test_fixed_targets_show_pre_fix_body_and_their_steps_hide_post_fix_text() ->
 
     assert view.node("category:x")["detail"] == "고치기 전 매뉴얼"
     assert view.node("step:x:1")["detail"] == STEP_HIDDEN
+
+
+def test_pre_fix_body_wins_over_the_evidence_rule() -> None:
+    hidden, _ = hidden_for(graph(), "case:A")
+    assert "info:new" in hidden
+
+    # 2325에 고치기 전 본문이 있으면 고치기 전에도 있던 정보다. 보여 준다.
+    shown = settle_hidden(hidden, {"info:new": "고치기 전 본문"}, set())
+    assert "info:new" not in shown
+    assert "change_item:1" in shown
+
+    # 고치기 전이 "없다"였으면 새로 만든 것이라 숨긴다.
+    assert "category:x" in settle_hidden(hidden, {}, {"category:x"})
