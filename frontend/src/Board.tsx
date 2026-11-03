@@ -178,9 +178,47 @@ function Notes({ notes }: { notes: string[] }) {
   );
 }
 
+const THREAD_OPEN_KEY = "board.threadOpen";
+
+function readThreadOpen(): boolean {
+  try {
+    return localStorage.getItem(THREAD_OPEN_KEY) !== "0";
+  } catch {
+    return true;
+  }
+}
+
+function Comment({ m, muted }: { m: ThreadMessage; muted?: boolean }) {
+  const [full, setFull] = useState(false);
+  const text = slackText(m.text);
+  const long = text.length > 240 || text.split("\n").length > 4;
+  return (
+    <div className="text-xs leading-relaxed">
+      <span className={m.me ? "font-semibold text-accent" : "font-semibold text-text"}>
+        {m.me ? "나" : m.who}
+      </span>
+      <span className="ml-1.5 text-muted">{clock(m.at)}</span>
+      <div
+        className={`whitespace-pre-wrap break-words ${muted ? "text-muted" : "text-text/85"} ${
+          long && !full ? "line-clamp-4" : ""
+        }`}
+      >
+        {text}
+      </div>
+      {long && (
+        <button onClick={() => setFull((f) => !f)} className="text-accent hover:underline">
+          {full ? "접기" : "더 보기"}
+        </button>
+      )}
+    </div>
+  );
+}
+
 function Thread({ draft }: { draft: Draft }) {
   const [messages, setMessages] = useState<ThreadMessage[] | null>(null);
   const [failed, setFailed] = useState<string | null>(null);
+  // 열고 닫은 상태는 초안을 옮겨 다녀도 그대로 둔다.
+  const [open, setOpen] = useState(readThreadOpen);
   useEffect(() => {
     let alive = true;
     getThread(draft)
@@ -193,25 +231,44 @@ function Thread({ draft }: { draft: Draft }) {
     };
     // 목록을 다시 읽을 때마다 draft 객체가 바뀐다. 다른 초안을 열 때만 다시 읽는다.
   }, [draft.id]);
+  const toggle = () =>
+    setOpen((was) => {
+      try {
+        localStorage.setItem(THREAD_OPEN_KEY, was ? "0" : "1");
+      } catch {
+        // 저장이 막혀도 이번 화면에서는 열고 닫힌다.
+      }
+      return !was;
+    });
   if (failed) return <div className="mt-3 text-xs text-warn">{failed}</div>;
   if (!messages) return <div className="mt-3 text-xs text-muted">스레드 읽는 중</div>;
+  const last = messages[messages.length - 1];
   return (
-    <div className="mt-3 space-y-1.5 border-l-2 border-line pl-3">
-      {messages.map((m, index) => (
-        <div key={m.ts} className="text-xs leading-relaxed">
-          <span className={m.me ? "font-semibold text-accent" : "font-semibold text-text"}>
-            {m.me ? "나" : m.who}
-          </span>
-          <span className="ml-1.5 text-muted">{clock(m.at)}</span>
-          <div
-            className={`whitespace-pre-wrap break-words ${
-              index === 0 && messages.length > 1 ? "line-clamp-2 text-muted" : "text-text/85"
-            }`}
-          >
-            {slackText(m.text)}
-          </div>
+    <div className="mt-3">
+      <button
+        onClick={toggle}
+        aria-expanded={open}
+        className="flex items-center gap-1.5 text-xs font-semibold text-muted hover:text-text"
+      >
+        <span>{open ? "▾" : "▸"}</span>
+        스레드 댓글 {messages.length}
+      </button>
+      {open ? (
+        <div className="mt-1.5 space-y-1.5 border-l-2 border-line pl-3">
+          {messages.map((m, index) => (
+            <Comment key={m.ts} m={m} muted={index === 0 && messages.length > 1} />
+          ))}
         </div>
-      ))}
+      ) : (
+        last && (
+          <button
+            onClick={toggle}
+            className="mt-1 block w-full truncate border-l-2 border-line pl-3 text-left text-xs text-muted hover:text-text"
+          >
+            {last.me ? "나" : last.who}: {slackText(last.text)}
+          </button>
+        )
+      )}
     </div>
   );
 }
