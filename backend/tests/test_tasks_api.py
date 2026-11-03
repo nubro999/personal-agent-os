@@ -21,6 +21,17 @@ def owner(monkeypatch: pytest.MonkeyPatch) -> Iterator[str]:
 
 
 @pytest.fixture(autouse=True)
+def no_slack_sweep(monkeypatch: pytest.MonkeyPatch) -> None:
+    """초안 목록을 읽으면 Slack을 보러 간다. 시험에서는 부르지 않는다."""
+    from app.api import tasks as tasks_api
+
+    async def nothing() -> int:
+        return 0
+
+    monkeypatch.setattr(tasks_api, "sweep_sent_drafts", nothing)
+
+
+@pytest.fixture(autouse=True)
 async def cleanup(owner: str) -> Any:
     yield
     async with get_sessionmaker().begin() as session:
@@ -130,3 +141,64 @@ async def test_lists_and_dismisses_drafts(client: AsyncClient, owner: str) -> No
     assert (await client.post(f"/api/drafts/{draft['id']}/dismiss")).status_code == 200
     assert (await client.get("/api/drafts")).json() == []
     assert (await client.post(f"/api/drafts/{uuid.uuid4()}/dismiss")).status_code == 404
+
+
+async def test_advice_queues_a_rewrite(
+    client: AsyncClient, owner: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from app.api import tasks as tasks_api
+
+    queued: list[uuid.UUID] = []
+
+    async def fake_rewrite(draft_id: uuid.UUID) -> None:
+        queued.append(draft_id)
+
+    monkeypatch.setattr(tasks_api, "rewrite_draft", fake_rewrite)
+    async with get_sessionmaker().begin() as session:
+        session.add(
+            ReplyDraft(
+                owner_id=owner,
+                reference="slack:C1:1.0",
+                channel="C1",
+                thread_ts="1.0",
+                marker="2.0",
+                draft="넵 확인하겠습니다",
+            )
+        )
+    [draft] = (await client.get("/api/drafts")).json()
+
+    url = f"/api/drafts/{draft['id']}/advice"
+    assert (await client.post(url, json={"text": " "})).status_code == 422
+    assert (await client.post(url, json={"text": "사유를 적어"})).status_code == 200
+    assert (await client.post(url, json={"text": "짧게"})).status_code == 200
+
+    [after] = (await client.get("/api/drafts")).json()
+    assert after["advice"] == ["사유를 적어", "짧게"]
+    assert (after["rewriting"], after["notes"]) == (True, [])
+    assert [str(i) for i in queued] == [draft["id"], draft["id"]]
+
+
+async def test_send_reports_why_it_did_not_send(
+    client: AsyncClient, owner: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from app.api import tasks as tasks_api
+    from app.trackers.slack import SendError
+
+    async def refuse(draft_id: uuid.UUID, text: str) -> str:
+        raise SendError("이미 답한 스레드라 보내지 않았다")
+
+    async def accept(draft_id: uuid.UUID, text: str) -> str:
+        return f"<@U2> {text}"
+
+    url = f"/api/drafts/{uuid.uuid4()}/send"
+    monkeypatch.setattr(tasks_api, "send_draft", refuse)
+    response = await client.post(url, json={"text": "처리했습니다"})
+    assert (response.status_code, response.json()["detail"]) == (
+        409,
+        "이미 답한 스레드라 보내지 않았다",
+    )
+
+    monkeypatch.setattr(tasks_api, "send_draft", accept)
+    assert (await client.post(url, json={"text": "처리했습니다"})).json() == {
+        "sent": "<@U2> 처리했습니다"
+    }

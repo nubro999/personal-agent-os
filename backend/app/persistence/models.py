@@ -5,6 +5,7 @@ from datetime import date, datetime
 from typing import Any
 
 from sqlalchemy import (
+    Boolean,
     CheckConstraint,
     Date,
     DateTime,
@@ -166,6 +167,18 @@ class ReplyDraft(Base):
     marker: Mapped[str] = mapped_column(Text, nullable=False)
     draft: Mapped[str] = mapped_column(Text, nullable=False)
     status: Mapped[str] = mapped_column(Text, nullable=False, server_default="pending")
+    # 보드에서 내가 남긴 조언. 다음 초안도 이것을 따른다. 내가 답하면 비운다.
+    advice: Mapped[list[str]] = mapped_column(
+        JSONB, nullable=False, server_default=text("'[]'::jsonb")
+    )
+    # 보내기 전에 확인할 것(건 회신 에이전트의 check)
+    notes: Mapped[list[str]] = mapped_column(
+        JSONB, nullable=False, server_default=text("'[]'::jsonb")
+    )
+    rewriting: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("false"))
+    # 내 마지막 답 뒤에 나를 처음 부른 시각과, 그 뒤로 더 부른 횟수(리마인드)
+    waiting_since: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    reminders: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
     created_at: Mapped[datetime] = _created_at()
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now()

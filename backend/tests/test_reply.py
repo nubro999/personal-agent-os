@@ -97,3 +97,26 @@ def test_prompt_never_contains_the_actual_reply() -> None:
     assert "반영 상태: 반영됨" in prompt
     assert "<@UA>" in prompt
     assert "case:Xcs_1" in prompt
+
+
+def test_chat_id_falls_back_to_the_zerotalk_link() -> None:
+    from app.reply.case_chat import chat_id_of
+
+    link = (
+        "확인 부탁드립니다 https://talk.zeroworks.ai/w/4fb61ff2-c6ec-4cd4-8a67-789b0279cea0"
+        "/conversations/f47a2c9b-3fda-4054-99ab-878762056462"
+    )
+    assert chat_id_of({"chat_id": "abc", "issue": link}) == "abc"
+    assert chat_id_of({"chat_id": None, "issue": link}) == "f47a2c9b-3fda-4054-99ab-878762056462"
+    assert chat_id_of({"chat_id": None, "issue": "링크 없음"}) is None
+
+
+def test_prompt_carries_advice_and_previous_draft() -> None:
+    case = sources.Case("CS-1", "Xcs_1", "hdex", "DF", "", "사유 확인 부탁", None, 0)
+    inputs = Inputs(case=case, thread=None, examples=[], mention="UA", actual=None)
+    assert "형섭의 조언" not in prompt_for(inputs)
+
+    inputs.advice, inputs.previous = ["사유를 적어"], "넵 확인하겠습니다"
+    prompt = prompt_for(inputs)
+    assert "## 이전 초안\n넵 확인하겠습니다" in prompt
+    assert "- 사유를 적어" in prompt

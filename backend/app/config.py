@@ -31,6 +31,8 @@ class Settings(BaseSettings):
     slack_token_key: str = "SLACK_MY_TOKEN"
     slack_lookback_days: int = 3
     slack_team_id: str = "T05NS1KHKUH"
+    # 건 카드 스레드가 서는 채널(유지보수-고객성공팀). 이 채널의 건 초안은 건 회신 에이전트가 쓴다.
+    slack_cs_channel: str = "C0A1CV8572S"
     # 한 번 실행에 만드는 답변 초안 수. Claude 호출 수를 묶어 둔다.
     slack_draft_limit: int = 5
     briefing_dir: Path = Path("~/.local/state/personal-agent-os/briefings")

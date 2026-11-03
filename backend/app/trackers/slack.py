@@ -18,8 +18,9 @@ import asyncio
 import json
 import logging
 import re
+import uuid
 from dataclasses import dataclass, field
-from datetime import date, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from typing import Any, Literal, Protocol
 from zoneinfo import ZoneInfo
@@ -56,6 +57,7 @@ MESSAGE_TEXT_LIMIT = 300
 DRAFT_CONTEXT_MESSAGES = 12
 DRAFT_TEXT_LIMIT = 800
 STYLE_SAMPLE_COUNT = 30
+LEADING_MENTION = re.compile(r"^\s*<@[A-Z0-9]+>\s*")
 SEARCH_PAGES = 3
 
 
@@ -71,6 +73,8 @@ class SlackClient(Protocol):
     async def user_name(self, user_id: str) -> str: ...
 
     async def my_messages(self, user_id: str) -> list[str]: ...
+
+    async def post(self, channel: str, text: str, thread_ts: str | None) -> str: ...
 
 
 class HttpSlackClient:
@@ -145,6 +149,18 @@ class HttpSlackClient:
         )
         return [m.get("text") or "" for m in data["messages"]["matches"]]
 
+    async def post(self, channel: str, text: str, thread_ts: str | None) -> str:
+        """내 이름으로 보낸다. 보드의 보내기 버튼만 부른다."""
+        body: dict[str, Any] = {"channel": channel, "text": text}
+        if thread_ts:
+            body["thread_ts"] = thread_ts
+        response = await self._http.post("chat.postMessage", json=body)
+        response.raise_for_status()
+        data: dict[str, Any] = response.json()
+        if not data.get("ok"):
+            raise RuntimeError(f"slack chat.postMessage failed: {data.get('error')}")
+        return str(data["ts"])
+
     async def aclose(self) -> None:
         await self._http.aclose()
 
@@ -167,6 +183,14 @@ class ThreadState:
     context: list[str] = field(default_factory=list)
     draft_context: list[str] = field(default_factory=list)
     is_dm: bool = False
+    # 내 마지막 답 뒤에 처음 나를 부른 글의 ts와, 그 뒤로 더 부른 횟수
+    waiting_since: float | None = None
+    reminders: int = 0
+
+    @property
+    def waiting(self) -> dict[str, Any]:
+        since = datetime.fromtimestamp(self.waiting_since, UTC) if self.waiting_since else None
+        return {"waiting_since": since, "reminders": self.reminders}
 
     @property
     def reference(self) -> str:
@@ -204,6 +228,11 @@ def analyze_thread(
     )
     root_text = (messages[0].get("text") or "") if messages else ""
     found = CS_PATTERN.search(root_text)
+    asks = [
+        float(m["ts"])
+        for m in messages
+        if m.get("user") != me and mention in (m.get("text") or "") and float(m["ts"]) > my_last
+    ]
     return ThreadState(
         channel=channel,
         thread_ts=thread_ts,
@@ -213,6 +242,8 @@ def analyze_thread(
         marker=f"{max(my_last, mention_last):.6f}",
         context=_format_messages(messages[1:], me, CONTEXT_MESSAGES, MESSAGE_TEXT_LIMIT),
         draft_context=_format_messages(messages[1:], me, DRAFT_CONTEXT_MESSAGES, DRAFT_TEXT_LIMIT),
+        waiting_since=min(asks) if asks else None,
+        reminders=max(0, len(asks) - 1),
     )
 
 
@@ -243,6 +274,8 @@ def analyze_dm(channel: str, messages: list[dict[str, Any]], me: str, partner: s
         context=_format_messages(human, me, CONTEXT_MESSAGES, MESSAGE_TEXT_LIMIT),
         draft_context=_format_messages(human, me, DRAFT_CONTEXT_MESSAGES, DRAFT_TEXT_LIMIT),
         is_dm=True,
+        waiting_since=float(unanswered[0]["ts"]) if unanswered else None,
+        reminders=max(0, len(unanswered) - 1),
     )
 
 
@@ -295,17 +328,73 @@ def style_samples(messages: list[str]) -> list[str]:
     return samples[:STYLE_SAMPLE_COUNT]
 
 
-def _draft_prompt(thread: ThreadState, task: Task, samples: list[str]) -> str:
-    lines = ["내 말투 샘플:", *(f"- {s}" for s in samples), "", f"연결된 할 일: {task.title}"]
-    lines.append(f"할 일 상태: {task.status}")
+def _draft_prompt(
+    thread: ThreadState,
+    task: Task | None,
+    samples: list[str],
+    advice: list[str] | None = None,
+    previous: str = "",
+) -> str:
+    lines = ["내 말투 샘플:", *(f"- {s}" for s in samples), ""]
+    if task:
+        lines += [f"연결된 할 일: {task.title}", f"할 일 상태: {task.status}"]
     lines += ["", f"대화 ({thread.root_text}):", *thread.draft_context]
+    if advice:
+        lines += ["", "이전 초안:", previous, "", "내 조언:", *(f"- {a}" for a in advice)]
     return "\n".join(lines)
 
 
+async def compose_draft(
+    llm: StructuredLLM,
+    thread: ThreadState,
+    task: Task | None,
+    samples: list[str],
+    advice: list[str],
+    previous: str,
+) -> tuple[str, list[str]]:
+    """(초안, 보내기 전에 확인할 것).
+
+    유지보수-고객성공팀의 건 스레드는 건 회신 에이전트가 쓴다. 에이전트 결과와 그 건의 대화를
+    읽어 사유를 적는다. 건 재료를 못 읽으면 일반 초안으로 쓴다.
+    """
+    if thread.cs_id and thread.channel == get_settings().slack_cs_channel:
+        # 건 회신 에이전트는 온톨로지와 Agent SDK를 불러 무겁다. 쓸 때만 읽는다.
+        from app.reply.draft import draft_for_board
+
+        try:
+            result = await draft_for_board(thread.cs_id, advice, previous)
+        except Exception as exc:  # 2325, 채팅 DB, Agent SDK 어디서든 실패할 수 있다
+            log.warning("case reply %s failed, using plain draft: %s", thread.cs_id, exc)
+            result = None
+        if result:
+            # 멘션은 내가 보낼 때 붙인다. 복사한 <@U...> 글자는 Slack에서 멘션이 되지 않는다.
+            return LEADING_MENTION.sub("", result.draft).strip(), result.check
+    out = await llm.generate(
+        system=DRAFT_PROMPT,
+        prompt=_draft_prompt(thread, task, samples, advice, previous),
+        output=DraftOut,
+    )
+    return out.draft.strip(), []
+
+
 async def _save_draft(
-    session: AsyncSession, *, owner_id: str, thread: ThreadState, task: Task, draft: str
+    session: AsyncSession,
+    *,
+    owner_id: str,
+    thread: ThreadState,
+    task: Task,
+    draft: str,
+    notes: list[str],
 ) -> None:
-    fields = {"marker": thread.marker, "draft": draft, "status": "pending", "task_id": task.id}
+    fields = {
+        "marker": thread.marker,
+        "draft": draft,
+        "notes": notes,
+        "status": "pending",
+        "task_id": task.id,
+        "rewriting": False,
+        **thread.waiting,
+    }
     await session.execute(
         pg_insert(ReplyDraft)
         .values(
@@ -330,7 +419,8 @@ async def _clear_drafts(session: AsyncSession, *, owner_id: str, thread: ThreadS
     )
     if not thread.is_dm:
         stmt = stmt.where(ReplyDraft.thread_ts == thread.thread_ts)
-    await session.execute(stmt.values(status="used", updated_at=func.now()))
+    # 조언은 그 답을 위한 것이었다. 다음 요청에는 새로 남긴다.
+    await session.execute(stmt.values(status="used", advice=[], updated_at=func.now()))
 
 
 async def _cs_task(session: AsyncSession, owner_id: str, cs_id: str) -> Task | None:
@@ -465,9 +555,18 @@ async def _write_drafts(
     settings = get_settings()
     samples = style_samples(await client.my_messages(settings.slack_user_id))
     for thread, task in wanted[: settings.slack_draft_limit]:
+        async with get_sessionmaker()() as session:
+            existing = await session.scalar(
+                select(ReplyDraft).where(
+                    ReplyDraft.owner_id == owner_id,
+                    ReplyDraft.reference == thread.reference,
+                    ReplyDraft.status == "pending",
+                )
+            )
+        advice = list(existing.advice) if existing else []
         try:
-            result = await llm.generate(
-                system=DRAFT_PROMPT, prompt=_draft_prompt(thread, task, samples), output=DraftOut
+            draft, notes = await compose_draft(
+                llm, thread, task, samples, advice, existing.draft if existing else ""
             )
         except LLMError as exc:
             # 초안은 없어도 Task는 남는다. 다음 메시지가 오면 다시 만든다.
@@ -475,9 +574,218 @@ async def _write_drafts(
             continue
         async with get_sessionmaker().begin() as session:
             await _save_draft(
-                session, owner_id=owner_id, thread=thread, task=task, draft=result.draft.strip()
+                session, owner_id=owner_id, thread=thread, task=task, draft=draft, notes=notes
             )
         stats.drafted += 1
+
+
+async def _current_thread(client: SlackClient, draft: ReplyDraft) -> ThreadState:
+    me = get_settings().slack_user_id
+    if draft.thread_ts:
+        return analyze_thread(
+            draft.channel, draft.thread_ts, await client.replies(draft.channel, draft.thread_ts), me
+        )
+    oldest = (datetime.now() - timedelta(days=get_settings().slack_lookback_days)).timestamp()
+    return analyze_dm(draft.channel, await client.history(draft.channel, oldest), me, "상대")
+
+
+async def sweep_sent_drafts(client: SlackClient | None = None) -> int:
+    """내가 이미 답한 스레드의 초안을 치운다. 수집기(30분)를 기다리지 않게 보드가 부른다."""
+    settings = get_settings()
+    async with get_sessionmaker()() as session:
+        drafts = list(
+            await session.scalars(
+                select(ReplyDraft).where(
+                    ReplyDraft.owner_id == settings.owner_id, ReplyDraft.status == "pending"
+                )
+            )
+        )
+    if not drafts:
+        return 0
+    own = client is None
+    if client is None:
+        token = await asyncio.to_thread(
+            _load_token, settings.slack_token_file, settings.slack_token_key
+        )
+        client = HttpSlackClient(token)
+    cleared = 0
+    try:
+        for draft in drafts:
+            try:
+                thread = await _current_thread(client, draft)
+            except (httpx.HTTPError, RuntimeError) as exc:
+                log.warning("draft sweep %s skipped: %s", draft.id, exc)
+                continue
+            async with get_sessionmaker().begin() as session:
+                if thread.pending:
+                    # 리마인드가 더 왔는지 수집기(30분)보다 먼저 맞춘다.
+                    await session.execute(
+                        update(ReplyDraft).where(ReplyDraft.id == draft.id).values(**thread.waiting)
+                    )
+                    continue
+                await _clear_drafts(session, owner_id=settings.owner_id, thread=thread)
+            cleared += 1
+    finally:
+        if own and isinstance(client, HttpSlackClient):
+            await client.aclose()
+    return cleared
+
+
+THREAD_MESSAGES = 10
+THREAD_TEXT_LIMIT = 1500
+_names: dict[str, str] = {}
+
+
+async def thread_messages(
+    draft_id: uuid.UUID, client: SlackClient | None = None
+) -> list[dict[str, Any]]:
+    """초안이 답하는 스레드의 마지막 글들. 보드 패널이 Slack을 열지 않고 맥락을 보게 한다."""
+    settings = get_settings()
+    async with get_sessionmaker()() as session:
+        draft = await session.get(ReplyDraft, draft_id)
+    if draft is None or draft.owner_id != settings.owner_id:
+        raise SendError("초안이 없다")
+    own = client is None
+    if client is None:
+        token = await asyncio.to_thread(
+            _load_token, settings.slack_token_file, settings.slack_token_key
+        )
+        client = HttpSlackClient(token)
+    try:
+        if draft.thread_ts:
+            messages = await client.replies(draft.channel, draft.thread_ts)
+        else:
+            oldest = (datetime.now() - timedelta(days=settings.slack_lookback_days)).timestamp()
+            messages = await client.history(draft.channel, oldest)
+        shown = [m for m in messages if (m.get("text") or "").strip()]
+        # 스레드 루트(건 카드)는 맨 앞에 남기고 나머지는 최근 것만 보인다.
+        if draft.thread_ts and len(shown) > THREAD_MESSAGES:
+            shown = [shown[0], *shown[-(THREAD_MESSAGES - 1) :]]
+        else:
+            shown = shown[-THREAD_MESSAGES:]
+        people: set[str] = {str(m["user"]) for m in shown if m.get("user")} | {
+            found for m in shown for found in re.findall(r"<@([A-Z0-9]+)>", m.get("text") or "")
+        }
+        for user in people - _names.keys():
+            try:
+                _names[user] = await client.user_name(user)
+            except RuntimeError:
+                _names[user] = user
+        out = []
+        for m in shown:
+            author = m.get("user")
+            text = re.sub(
+                r"<@([A-Z0-9]+)>", lambda found: f"@{_names.get(found[1], '')}", m.get("text") or ""
+            )
+            out.append(
+                {
+                    "ts": m["ts"],
+                    "at": datetime.fromtimestamp(float(m["ts"]), UTC),
+                    "who": _names.get(author or "", "") or m.get("username") or "봇",
+                    "me": author == settings.slack_user_id,
+                    "text": text[:THREAD_TEXT_LIMIT],
+                }
+            )
+        return out
+    except (httpx.HTTPError, RuntimeError) as exc:
+        raise SendError(str(exc)) from exc
+    finally:
+        if own and isinstance(client, HttpSlackClient):
+            await client.aclose()
+
+
+class SendError(Exception):
+    """보내지 않았다. 초안이 없거나, 이미 답했거나, Slack이 거절했다."""
+
+
+def asker(messages: list[dict[str, Any]], me: str) -> str | None:
+    """나를 마지막으로 부른 사람. 스레드 답은 그 사람을 멘션해서 보낸다."""
+    mention = f"<@{me}>"
+    for message in reversed(messages):
+        if message.get("user") not in (None, me) and mention in (message.get("text") or ""):
+            return str(message["user"])
+    return None
+
+
+async def send_draft(draft_id: uuid.UUID, text: str, client: SlackClient | None = None) -> str:
+    """보드에서 고친 초안을 그 스레드(DM이면 그 대화)에 보내고 초안을 치운다. 보낸 글을 돌려준다."""
+    settings = get_settings()
+    text = text.strip()
+    if not text:
+        raise SendError("보낼 글이 비어 있다")
+    async with get_sessionmaker()() as session:
+        draft = await session.get(ReplyDraft, draft_id)
+    if draft is None or draft.owner_id != settings.owner_id or draft.status != "pending":
+        raise SendError("보낼 초안이 없다")
+    own = client is None
+    if client is None:
+        token = await asyncio.to_thread(
+            _load_token, settings.slack_token_file, settings.slack_token_key
+        )
+        client = HttpSlackClient(token)
+    try:
+        if draft.thread_ts:
+            messages = await client.replies(draft.channel, draft.thread_ts)
+            me = settings.slack_user_id
+            thread = analyze_thread(draft.channel, draft.thread_ts, messages, me)
+            target = asker(messages, me)
+            if target and not text.startswith("<@"):
+                text = f"<@{target}> {text}"
+        else:
+            thread = await _current_thread(client, draft)
+        if not thread.pending:
+            # 다른 데서 이미 답했다. 두 번 보내지 않는다.
+            async with get_sessionmaker().begin() as session:
+                await _clear_drafts(session, owner_id=settings.owner_id, thread=thread)
+            raise SendError("이미 답한 스레드라 보내지 않았다")
+        await client.post(draft.channel, text, draft.thread_ts)
+    except (httpx.HTTPError, RuntimeError) as exc:
+        raise SendError(str(exc)) from exc
+    finally:
+        if own and isinstance(client, HttpSlackClient):
+            await client.aclose()
+    async with get_sessionmaker().begin() as session:
+        await _clear_drafts(session, owner_id=settings.owner_id, thread=thread)
+    return text
+
+
+async def rewrite_draft(draft_id: uuid.UUID) -> None:
+    """보드에서 조언을 남긴 초안을 다시 쓴다. 지금 스레드를 다시 읽는다."""
+    settings = get_settings()
+    async with get_sessionmaker()() as session:
+        draft = await session.get(ReplyDraft, draft_id)
+        task = await session.get(Task, draft.task_id) if draft and draft.task_id else None
+    if draft is None:
+        return
+    values: dict[str, Any] = {"rewriting": False}
+    try:
+        token = await asyncio.to_thread(
+            _load_token, settings.slack_token_file, settings.slack_token_key
+        )
+        client = HttpSlackClient(token)
+        try:
+            thread = await _current_thread(client, draft)
+            if not thread.pending:
+                # 그사이 내가 답했다. 다시 쓰지 않고 치운다.
+                async with get_sessionmaker().begin() as session:
+                    await _clear_drafts(session, owner_id=settings.owner_id, thread=thread)
+                return
+            samples = style_samples(await client.my_messages(settings.slack_user_id))
+            text, notes = await compose_draft(
+                get_llm(), thread, task, samples, list(draft.advice), draft.draft
+            )
+        finally:
+            await client.aclose()
+        values |= {"draft": text, "notes": notes, **thread.waiting}
+    except (OSError, KeyError, ValueError, httpx.HTTPError, RuntimeError, LLMError) as exc:
+        log.warning("draft rewrite %s failed: %s", draft_id, exc)
+    finally:
+        async with get_sessionmaker().begin() as session:
+            await session.execute(
+                update(ReplyDraft)
+                .where(ReplyDraft.id == draft_id)
+                .values(**values, updated_at=func.now())
+            )
 
 
 async def run(client: SlackClient, llm: StructuredLLM, now: datetime | None = None) -> SlackStats:

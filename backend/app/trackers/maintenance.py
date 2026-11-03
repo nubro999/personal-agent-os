@@ -13,6 +13,7 @@ Task는 2325 건을 따라가는 거울이라 상태가 바뀌면 그대로 반�
 """
 
 import asyncio
+import hashlib
 import logging
 import re
 import time
@@ -43,7 +44,11 @@ from app.persistence.models import ActivitySession, Task
 log = logging.getLogger(__name__)
 
 SOURCE = "2325"
-TITLE_FEEDBACK_LIMIT = 40
+TITLE_FEEDBACK_LIMIT = 60
+DETAIL_LIMIT = 4000
+# 피드백 시트 행은 "[1254행] [수정이 필요한 AI답변] ... [피드백 내용] ..." 꼴이다.
+_ROW = re.compile(r"^\s*\[\d+행\]\s*")
+_SECTION = re.compile(r"\[(수정이 필요한 AI답변|피드백 내용|적정 답변 예시)\]")
 CONNECT_ATTEMPTS = 4
 CONNECT_RETRY_SECONDS = 10
 _STAGE_STATUS: dict[str, TaskStatus] = {
@@ -87,10 +92,34 @@ class MaintItem:
 
     @property
     def title(self) -> str:
-        summary = re.sub(r"\s+", " ", self.feedback).strip()
+        summary = feedback_summary(self.feedback)
         if len(summary) > TITLE_FEEDBACK_LIMIT:
             summary = summary[:TITLE_FEEDBACK_LIMIT].rstrip() + "…"
         return f"{self.human_id} {summary}".strip() or self.item_key
+
+    @property
+    def detail(self) -> str | None:
+        text = self.feedback.replace("\r\n", "\n").strip()
+        return text[:DETAIL_LIMIT] or None
+
+
+def feedback_summary(feedback: str) -> str:
+    """제목에 쓸 한 줄. 시트 행이면 피드백 내용을, 비었으면 고칠 AI답변을 쓴다."""
+    text = _ROW.sub("", feedback)
+    parts: dict[str, str] = {}
+    pieces = _SECTION.split(text)
+    for name, body in zip(pieces[1::2], pieces[2::2], strict=True):
+        parts[name] = body
+    for name in ("피드백 내용", "수정이 필요한 AI답변"):
+        body = _flat(parts.get(name, "")).strip(" -")
+        if len(body) > 1:
+            return body
+    # 대화 링크만 붙인 피드백도 있다. 링크를 빼고 남는 말이 있으면 그것을 쓴다.
+    return _flat(text) or re.sub(r"\s+", " ", text).strip()
+
+
+def _flat(text: str) -> str:
+    return re.sub(r"\s+", " ", re.sub(r"https?://\S+", " ", text)).strip()
 
 
 def connect(
@@ -166,6 +195,9 @@ async def sync_item(
                 actor="maintenance_tracker",
                 new=NewTask(
                     title=Evidence(item.title, "external", None, reference),
+                    description=Evidence(item.detail, "external", None, reference)
+                    if item.detail
+                    else None,
                     project=Evidence(item.company, "external", None, reference)
                     if item.company
                     else None,
@@ -201,6 +233,50 @@ async def sync_item(
             set_={"summary": item.state_key, "updated_at": datetime.now(UTC)},
         )
     )
+
+
+async def refresh_texts(items: list[MaintItem]) -> int:
+    """열린 일의 제목과 원문을 2325 피드백에 맞춘다. 제목 규칙이 바뀌거나 피드백이 고쳐졌을 때."""
+    settings = get_settings()
+    by_reference = {f"{SOURCE}:{item.item_key}": item for item in items}
+    async with get_sessionmaker()() as session:
+        tasks = list(
+            await session.scalars(
+                select(Task).where(
+                    Task.owner_id == settings.owner_id,
+                    Task.source == SOURCE,
+                    Task.status.not_in(("done", "cancelled")),
+                )
+            )
+        )
+    changed = 0
+    for task in tasks:
+        item = by_reference.get(task.request_id or "")
+        if item is None or (task.title, task.description) == (item.title, item.detail):
+            continue
+        reference = f"{SOURCE}:{item.item_key}"
+        digest = hashlib.sha1(f"{item.title}\n{item.detail}".encode()).hexdigest()[:12]
+        async with get_sessionmaker().begin() as session:
+            try:
+                result = await update_task(
+                    session,
+                    owner_id=settings.owner_id,
+                    task_id=task.id,
+                    expected_version=task.version,
+                    request_id=f"{reference}:text:{digest}",
+                    actor="maintenance_tracker",
+                    changes=TaskChanges(
+                        title=Evidence(item.title, "external", None, reference),
+                        description=Evidence(item.detail, "external", None, reference)
+                        if item.detail
+                        else None,
+                    ),
+                    reason="2325 피드백 제목",
+                )
+            except VersionConflict:
+                continue
+        changed += result.applied
+    return changed
 
 
 async def run(items: list[MaintItem], now: datetime | None = None) -> MaintStats:
@@ -240,12 +316,14 @@ async def run_once() -> str | None:
         log.warning("2325 tracker skipped: %s", exc)
         return f"2325 DB 연결 실패: {type(exc).__name__}"
     stats = await run(items)
+    refreshed = await refresh_texts(items)
     log.info(
-        "2325 tracker: items=%d created=%d updated=%d skipped_old=%d",
+        "2325 tracker: items=%d created=%d updated=%d skipped_old=%d refreshed=%d",
         len(items),
         stats.created,
         stats.updated,
         stats.skipped_old,
+        refreshed,
     )
     return None
 

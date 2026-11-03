@@ -2,20 +2,37 @@ export type Task = {
   id: string;
   version: number;
   title: string;
+  description: string | null;
   project: string | null;
   status: string;
   priority: string;
   due_date: string | null;
   source: string;
+  created_at: string;
   updated_at: string;
   suggestion: string | null;
 };
 
 export type Draft = {
   id: string;
+  task_id: string | null;
   task_title: string | null;
   draft: string;
   slack_url: string;
+  notes: string[];
+  advice: string[];
+  rewriting: boolean;
+  updated_at: string;
+  waiting_since: string | null;
+  reminders: number;
+};
+
+export type ThreadMessage = {
+  ts: string;
+  at: string;
+  who: string;
+  me: boolean;
+  text: string;
 };
 
 export type Concept = {
@@ -90,3 +107,25 @@ export const dismissSuggestion = (task: Task) =>
 
 export const dismissDraft = (draft: Draft) =>
   fetch(`/api/drafts/${draft.id}/dismiss`, { method: "POST" }).then(json);
+
+export const getThread = (draft: Draft) =>
+  fetch(`/api/drafts/${draft.id}/thread`).then(json<ThreadMessage[]>);
+
+// 내 이름으로 Slack에 보낸다. 실패하면 서버가 준 이유를 그대로 보여 준다.
+export const sendDraft = async (draft: Draft, text: string) => {
+  const response = await fetch(`/api/drafts/${draft.id}/send`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ text }),
+  });
+  const body = (await response.json().catch(() => ({}))) as { detail?: string; sent?: string };
+  if (!response.ok) throw new Error(body.detail ?? `보내지 못했어요 (${response.status})`);
+  return body.sent ?? text;
+};
+
+export const adviseDraft = (draft: Draft, text: string) =>
+  fetch(`/api/drafts/${draft.id}/advice`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ text }),
+  }).then(json);

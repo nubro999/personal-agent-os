@@ -46,11 +46,39 @@ def test_stage_wins_over_ax_status(stage: str | None, status_group: str, expecte
 
 
 def test_title_is_human_id_and_short_feedback() -> None:
-    # 줄바꿈은 공백 하나로 접고, 40자를 넘으면 자른다.
-    title = item().title
+    # 줄바꿈은 공백 하나로 접고, 60자를 넘으면 자른다.
     assert (
-        title == "CS-0004387 사은품 스케일러 120g 재고소진으로 데미지 체험키트로 변경되었습니다.…"
+        item().title
+        == "CS-0004387 사은품 스케일러 120g 재고소진으로 데미지 체험키트로 변경되었습니다. 답변"
     )
+    assert item(feedback="가" * 70).title == "CS-0004387 " + "가" * 60 + "…"
+    assert (
+        item().detail == "사은품 스케일러 120g\n재고소진으로 데미지 체험키트로 변경되었습니다. 답변"
+    )
+
+
+@pytest.mark.parametrize(
+    ("feedback", "expected"),
+    [
+        (
+            "[1254행] [수정이 필요한 AI답변] -\n[피드백 내용] 관능불량 혹은 외관불량 입니다."
+            "\n[적정 답변 예시] -",
+            "관능불량 혹은 외관불량 입니다.",
+        ),
+        (
+            "[1301행] [수정이 필요한 AI답변] 담당 매니저와 연결이 필요합니다.\n[피드백 내용] -",
+            "담당 매니저와 연결이 필요합니다.",
+        ),
+        (
+            "제품문의시트 정보를 참고하는지 확인 부탁드립니다!",
+            "제품문의시트 정보를 참고하는지 확인 부탁드립니다!",
+        ),
+        ("https://talk.zeroworks.ai/w/1/c/2\n교환 이관 사유 확인", "교환 이관 사유 확인"),
+        ("https://talk.zeroworks.ai/w/1", "https://talk.zeroworks.ai/w/1"),
+    ],
+)
+def test_sheet_rows_use_the_feedback_part(feedback: str, expected: str) -> None:
+    assert maintenance.feedback_summary(feedback) == expected
 
 
 @pytest.fixture
@@ -120,3 +148,20 @@ async def test_unchanged_2325_state_does_not_undo_user_change(owner: str) -> Non
 
     assert stats.updated == 0
     assert await _tasks(owner) == {"2325:Xcs_1": ("done", "그로우어스")}
+
+
+async def test_refresh_texts_rewrites_old_titles(owner: str) -> None:
+    sheet = "[1254행] [수정이 필요한 AI답변] -\n[피드백 내용] 관능불량 혹은 외관불량 입니다."
+    await maintenance.run([item(feedback=sheet)], now=NOW)
+    async with get_sessionmaker().begin() as session:
+        task = await session.scalar(select(Task).where(Task.owner_id == owner))
+        assert task is not None
+        task.title, task.description = "CS-0004387 [1254행] [수정이 필요한…", None
+
+    assert await maintenance.refresh_texts([item(feedback=sheet)]) == 1
+    assert await maintenance.refresh_texts([item(feedback=sheet)]) == 0
+    async with get_sessionmaker()() as session:
+        task = await session.scalar(select(Task).where(Task.owner_id == owner))
+        assert task is not None
+        assert task.title == "CS-0004387 관능불량 혹은 외관불량 입니다."
+        assert task.description == sheet.replace("\r\n", "\n")

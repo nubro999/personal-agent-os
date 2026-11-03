@@ -5,7 +5,7 @@ from typing import Any
 from zoneinfo import ZoneInfo
 
 import pytest
-from sqlalchemy import delete, select
+from sqlalchemy import delete, select, update
 
 from app.config import get_settings
 from app.domain.tasks.service import Evidence, NewTask, create_task, list_pending_suggestions
@@ -71,6 +71,11 @@ class FakeSlack:
     ) -> None:
         self.threads = threads or {}
         self.dms = dms or {}
+        self.posted: list[tuple[str, str, str | None]] = []
+
+    async def post(self, channel: str, text: str, thread_ts: str | None) -> str:
+        self.posted.append((channel, text, thread_ts))
+        return "9.0"
 
     async def dm_channels(self) -> list[dict[str, Any]]:
         return [{"id": d, "user": "U2", "updated": NOW.timestamp() * 1000} for d in self.dms]
@@ -377,3 +382,158 @@ async def test_dm_reply_clears_draft(owner: str) -> None:
     await slack.run(client, FakeLLM(), now=NOW)
 
     assert await _drafts(owner) == [("넵 확인하겠습니다", "used")]
+
+
+async def _notes(owner: str) -> list[tuple[str, list[str], list[str]]]:
+    async with get_sessionmaker()() as session:
+        rows = await session.scalars(select(ReplyDraft).where(ReplyDraft.owner_id == owner))
+        return [(d.draft, d.notes, d.advice) for d in rows]
+
+
+def _cs_thread() -> dict[tuple[str, str], list[dict[str, Any]]]:
+    return {
+        ("C1", "1.0"): [
+            msg("1.0", "BOT", "Hdex (CS-0004472)"),
+            msg("2.0", "U2", f"<@{ME}> 담당자 이관 사유 확인 부탁드립니다"),
+        ]
+    }
+
+
+async def test_cs_channel_thread_is_drafted_by_the_case_agent(
+    owner: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from app.reply import draft as reply_draft
+
+    seen: list[tuple[str, list[str]]] = []
+
+    async def fake(cs: str, advice: list[str], previous: str) -> reply_draft.ReplyDraft:
+        seen.append((cs, advice))
+        return reply_draft.ReplyDraft(
+            draft="<@UA> 주문 조회 결과가 없어 이관되었습니다.", answers=[], check=["반영 전"]
+        )
+
+    monkeypatch.setattr(get_settings(), "slack_cs_channel", "C1")
+    monkeypatch.setattr(reply_draft, "draft_for_board", fake)
+    await _seed(owner, "CS-0004472 이관 사유")
+
+    await slack.run(FakeSlack(_cs_thread()), FakeLLM(triage()), now=NOW)
+
+    assert seen == [("CS-0004472", [])]
+    assert await _notes(owner) == [("주문 조회 결과가 없어 이관되었습니다.", ["반영 전"], [])]
+
+
+async def test_case_agent_failure_falls_back_to_a_plain_draft(
+    owner: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from app.reply import draft as reply_draft
+
+    async def broken(cs: str, advice: list[str], previous: str) -> None:
+        raise RuntimeError("tunnel down")
+
+    monkeypatch.setattr(get_settings(), "slack_cs_channel", "C1")
+    monkeypatch.setattr(reply_draft, "draft_for_board", broken)
+    await _seed(owner, "CS-0004472 이관 사유")
+
+    await slack.run(FakeSlack(_cs_thread()), FakeLLM(triage()), now=NOW)
+
+    assert await _notes(owner) == [("넵 확인하겠습니다", [], [])]
+
+
+async def test_advice_is_kept_for_the_next_draft(owner: str) -> None:
+    thread = [msg("1.0", "U2", f"<@{ME}> 쿠폰 안내 확인해 주세요")]
+    client = FakeSlack({("C1", "1.0"): thread})
+    await slack.run(client, FakeLLM(triage()), now=NOW)
+    async with get_sessionmaker().begin() as session:
+        await session.execute(
+            update(ReplyDraft).where(ReplyDraft.owner_id == owner).values(advice=["기한도 적어"])
+        )
+
+    thread.append(msg("3.0", "U2", f"<@{ME}> 리마인드"))
+    llm = FakeLLM(triage())
+    await slack.run(client, llm, now=NOW)
+
+    assert "이전 초안:\n넵 확인하겠습니다\n\n내 조언:\n- 기한도 적어" in llm.prompts[-1]
+    assert await _notes(owner) == [("넵 확인하겠습니다", [], ["기한도 적어"])]
+
+
+async def test_sweep_clears_drafts_i_already_answered(owner: str) -> None:
+    answered = [msg("1.0", "U2", f"<@{ME}> 확인해 주세요")]
+    waiting = [msg("1.0", "U2", f"<@{ME}> 이것도 봐주세요")]
+    client = FakeSlack({("C1", "1.0"): answered, ("C2", "1.0"): waiting})
+    await slack.run(client, FakeLLM(triage(), triage(ref="S2", title="다른 일")), now=NOW)
+    assert len(await _drafts(owner)) == 2
+
+    answered += [msg("2.0", ME, "처리했습니다"), msg("3.0", "U2", "감사합니다")]
+
+    assert await slack.sweep_sent_drafts(client) == 1
+    async with get_sessionmaker()() as session:
+        rows = await session.scalars(select(ReplyDraft).where(ReplyDraft.owner_id == owner))
+        assert sorted((d.channel, d.status) for d in rows) == [("C1", "used"), ("C2", "pending")]
+
+
+async def test_send_mentions_the_asker_and_clears_the_draft(owner: str) -> None:
+    thread = [msg("1.0", "BOT", "루트"), msg("2.0", "U2", f"<@{ME}> <@U3> 확인해 주세요")]
+    client = FakeSlack({("C1", "1.0"): thread})
+    await slack.run(client, FakeLLM(triage()), now=NOW)
+    async with get_sessionmaker()() as session:
+        draft_id = await session.scalar(select(ReplyDraft.id).where(ReplyDraft.owner_id == owner))
+    assert draft_id is not None
+
+    sent = await slack.send_draft(draft_id, " 처리했습니다 ", client)
+
+    assert sent == "<@U2> 처리했습니다"
+    assert client.posted == [("C1", "<@U2> 처리했습니다", "1.0")]
+    assert await _drafts(owner) == [("넵 확인하겠습니다", "used")]
+    with pytest.raises(slack.SendError):
+        await slack.send_draft(draft_id, "또", client)
+    assert len(client.posted) == 1
+
+
+async def test_send_refuses_a_thread_i_already_answered(owner: str) -> None:
+    thread = [msg("1.0", "BOT", "루트"), msg("2.0", "U2", f"<@{ME}> 확인해 주세요")]
+    client = FakeSlack({("C1", "1.0"): thread})
+    await slack.run(client, FakeLLM(triage()), now=NOW)
+    async with get_sessionmaker()() as session:
+        draft_id = await session.scalar(select(ReplyDraft.id).where(ReplyDraft.owner_id == owner))
+    assert draft_id is not None
+    thread.append(msg("3.0", ME, "넵"))
+
+    with pytest.raises(slack.SendError, match="이미 답한"):
+        await slack.send_draft(draft_id, "<@U9> 처리했습니다", client)
+
+    assert client.posted == []
+    assert await _drafts(owner) == [("넵 확인하겠습니다", "used")]
+
+
+def test_waiting_counts_asks_after_my_last_reply() -> None:
+    messages = [
+        msg("1.0", "BOT", "루트"),
+        msg("2.0", "U2", f"<@{ME}> 봐줘"),
+        msg("3.0", ME, "넵"),
+        msg("4.0", "U2", f"<@{ME}> 반영 되었을까요?"),
+        msg("5.0", "U3", "저도 궁금해요"),
+        msg("6.0", "U2", f"<@{ME}> 리마인드요"),
+    ]
+
+    thread = analyze_thread("C1", "1.0", messages, ME)
+
+    assert (thread.waiting_since, thread.reminders) == (4.0, 1)
+    assert analyze_thread("C1", "1.0", messages[:3], ME).waiting_since is None
+
+
+async def test_thread_messages_keep_the_card_and_name_people(owner: str) -> None:
+    thread = [msg("1.0", "BOT", "건 카드")] + [
+        msg(f"{i}.0", "U2", f"<@{ME}> 리마인드 {i}") for i in range(2, 15)
+    ]
+    client = FakeSlack({("C1", "1.0"): thread})
+    await slack.run(client, FakeLLM(triage()), now=NOW)
+    async with get_sessionmaker()() as session:
+        draft = await session.scalar(select(ReplyDraft).where(ReplyDraft.owner_id == owner))
+    assert draft is not None and draft.reminders == 12
+
+    shown = await slack.thread_messages(draft.id, client)
+
+    assert len(shown) == slack.THREAD_MESSAGES
+    assert shown[0]["text"] == "건 카드"
+    assert shown[-1]["text"] == "@김재서 리마인드 14"
+    assert shown[-1]["who"] == "김재서" and not shown[-1]["me"]

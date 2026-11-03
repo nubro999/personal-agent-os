@@ -7,6 +7,9 @@
 같은 스레드의 내 글은 말투 예시에서 빼고, 온톨로지는 그 건을 처리하기 전으로 되돌린다.
 초안과 실제 회신을 나란히 적는다.
 
+보드: Slack 수집기가 유지보수-고객성공팀의 건 스레드 초안을 draft_for_board로 쓴다. 내가 보드에
+남긴 조언과 이전 초안을 받아 다시 쓴다.
+
 실행: uv run python -m app.reply.draft [--eval] CS-0004456 [CS-...]
 결과: <PAO_ONTOLOGY_DIR>/회신/<날짜>_<건>.md
 """
@@ -15,8 +18,10 @@ import argparse
 import asyncio
 import json
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import date, datetime
+from functools import lru_cache
+from typing import Any
 
 from claude_agent_sdk import (
     AssistantMessage,
@@ -37,6 +42,7 @@ from app.ontology.trial import (
     turn_cutoff,
 )
 from app.reply import sources
+from app.reply.case_chat import case_chat_tool
 from app.reply.prompts import REPLY_SYSTEM
 
 log = logging.getLogger(__name__)
@@ -61,6 +67,8 @@ class Inputs:
     examples: list[str]
     mention: str
     actual: sources.Message | None  # 시험일 때 내가 실제로 남긴 회신
+    advice: list[str] = field(default_factory=list)  # 보드에서 내가 남긴 조언
+    previous: str = ""  # 조언을 받은 이전 초안
 
 
 def gather(cs: str, evaluate: bool, replies: list[sources.MyReply]) -> Inputs:
@@ -125,15 +133,24 @@ def prompt_for(inputs: Inputs) -> str:
         "## 형섭의 지난 회신 (최근 것부터)",
         *(f"---\n{example}" for example in inputs.examples),
         "",
-        "회신 초안을 형식에 맞춰 내.",
     ]
+    if inputs.advice:
+        lines += [
+            "## 이전 초안",
+            inputs.previous or "없음",
+            "",
+            "## 형섭의 조언 (먼저 남긴 것부터)",
+            *(f"- {a}" for a in inputs.advice),
+            "",
+        ]
+    lines.append("회신 초안을 형식에 맞춰 내.")
     return "\n".join(lines)
 
 
 async def write_draft(
     inputs: Inputs, view: OntologyView, cutoff: dict[str, int]
 ) -> tuple[ReplyDraft | None, list[str], str]:
-    tools = ontology_tools(view, cutoff)
+    tools = [*ontology_tools(view, cutoff), case_chat_tool]
     options = ClaudeAgentOptions(
         model=MODEL,
         system_prompt=REPLY_SYSTEM,
@@ -164,6 +181,28 @@ async def write_draft(
         f"{result.subtype if result else 'no result'}, turns {result.num_turns if result else '-'}"
     )
     return parsed, calls, status
+
+
+@lru_cache(maxsize=1)
+def _ontology() -> tuple[dict[str, Any], dict[str, dict[str, Any]], dict[str, str]]:
+    return load_ontology()
+
+
+@lru_cache(maxsize=1)
+def _replies() -> list[sources.MyReply]:
+    return sources.load_my_replies()
+
+
+async def draft_for_board(cs: str, advice: list[str], previous: str) -> ReplyDraft | None:
+    """보드 초안. 그 건의 지금 스레드 전체를 보고, 조언이 있으면 이전 초안을 고쳐 쓴다."""
+    replies = await asyncio.to_thread(_replies)
+    inputs = await asyncio.to_thread(gather, cs, False, replies)
+    inputs.advice, inputs.previous = advice, previous
+    data, concepts, definitions = await asyncio.to_thread(_ontology)
+    view = OntologyView(data, concepts, definitions, set(), {})
+    draft, calls, status = await write_draft(inputs, view, {})
+    log.info("board reply %s: %s calls=%d advice=%d", cs, status, len(calls), len(advice))
+    return draft
 
 
 def report(inputs: Inputs, draft: ReplyDraft | None, calls: list[str], status: str) -> str:
