@@ -27,7 +27,7 @@ from zoneinfo import ZoneInfo
 
 import httpx
 from pydantic import BaseModel, ConfigDict, Field
-from sqlalchemy import func, select, update
+from sqlalchemy import func, or_, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -186,6 +186,7 @@ class ThreadState:
     # 내 마지막 답 뒤에 처음 나를 부른 글의 ts와, 그 뒤로 더 부른 횟수
     waiting_since: float | None = None
     reminders: int = 0
+    my_last: float = 0.0
 
     @property
     def waiting(self) -> dict[str, Any]:
@@ -244,6 +245,7 @@ def analyze_thread(
         draft_context=_format_messages(messages[1:], me, DRAFT_CONTEXT_MESSAGES, DRAFT_TEXT_LIMIT),
         waiting_since=min(asks) if asks else None,
         reminders=max(0, len(asks) - 1),
+        my_last=my_last,
     )
 
 
@@ -276,6 +278,7 @@ def analyze_dm(channel: str, messages: list[dict[str, Any]], me: str, partner: s
         is_dm=True,
         waiting_since=float(unanswered[0]["ts"]) if unanswered else None,
         reminders=max(0, len(unanswered) - 1),
+        my_last=my_last,
     )
 
 
@@ -377,7 +380,17 @@ async def compose_draft(
     return out.draft.strip(), []
 
 
-async def _save_draft(
+def answered(draft: ReplyDraft, thread: ThreadState) -> bool:
+    """이 초안이 필요 없어졌나.
+
+    부른 초안은 내 차례가 끝났으면, 미리 쓴 초안은 쓴 뒤에 내가 답했으면 필요 없다.
+    """
+    if draft.origin == "case":
+        return thread.my_last > draft.created_at.timestamp()
+    return not thread.pending
+
+
+async def save_draft(
     session: AsyncSession,
     *,
     owner_id: str,
@@ -385,8 +398,10 @@ async def _save_draft(
     task: Task,
     draft: str,
     notes: list[str],
+    origin: str = "mention",
 ) -> None:
     fields = {
+        "origin": origin,
         "marker": thread.marker,
         "draft": draft,
         "notes": notes,
@@ -411,11 +426,13 @@ async def _save_draft(
 
 
 async def _clear_drafts(session: AsyncSession, *, owner_id: str, thread: ThreadState) -> None:
-    """내가 답했으니 그 대화의 초안은 치운다."""
+    """내가 답했으니 그 대화의 초안은 치운다. 미리 쓴 초안은 쓴 뒤에 내가 답했을 때만 치운다."""
+    replied = datetime.fromtimestamp(thread.my_last, UTC)
     stmt = update(ReplyDraft).where(
         ReplyDraft.owner_id == owner_id,
         ReplyDraft.channel == thread.channel,
         ReplyDraft.status == "pending",
+        or_(ReplyDraft.origin == "mention", ReplyDraft.created_at < replied),
     )
     if not thread.is_dm:
         stmt = stmt.where(ReplyDraft.thread_ts == thread.thread_ts)
@@ -573,7 +590,7 @@ async def _write_drafts(
             log.warning("slack draft failed: %s", exc)
             continue
         async with get_sessionmaker().begin() as session:
-            await _save_draft(
+            await save_draft(
                 session, owner_id=owner_id, thread=thread, task=task, draft=draft, notes=notes
             )
         stats.drafted += 1
@@ -617,7 +634,7 @@ async def sweep_sent_drafts(client: SlackClient | None = None) -> int:
                 log.warning("draft sweep %s skipped: %s", draft.id, exc)
                 continue
             async with get_sessionmaker().begin() as session:
-                if thread.pending:
+                if not answered(draft, thread):
                     # 리마인드가 더 왔는지 수집기(30분)보다 먼저 맞춘다.
                     await session.execute(
                         update(ReplyDraft).where(ReplyDraft.id == draft.id).values(**thread.waiting)
@@ -729,11 +746,14 @@ async def send_draft(draft_id: uuid.UUID, text: str, client: SlackClient | None 
             me = settings.slack_user_id
             thread = analyze_thread(draft.channel, draft.thread_ts, messages, me)
             target = asker(messages, me)
+            if target is None and draft.channel == settings.slack_cs_channel:
+                # 미리 쓴 회신은 아무도 부르지 않은 카드에 남긴다. 늘 부르던 소통 담당자를 부른다.
+                target = settings.slack_cs_contact
             if target and not text.startswith("<@"):
                 text = f"<@{target}> {text}"
         else:
             thread = await _current_thread(client, draft)
-        if not thread.pending:
+        if answered(draft, thread):
             # 다른 데서 이미 답했다. 두 번 보내지 않는다.
             async with get_sessionmaker().begin() as session:
                 await _clear_drafts(session, owner_id=settings.owner_id, thread=thread)
@@ -745,6 +765,12 @@ async def send_draft(draft_id: uuid.UUID, text: str, client: SlackClient | None 
         if own and isinstance(client, HttpSlackClient):
             await client.aclose()
     async with get_sessionmaker().begin() as session:
+        # 방금 보낸 답은 thread에 아직 없다. 보낸 초안은 id로 치운다.
+        await session.execute(
+            update(ReplyDraft)
+            .where(ReplyDraft.id == draft_id)
+            .values(status="used", advice=[], updated_at=func.now())
+        )
         await _clear_drafts(session, owner_id=settings.owner_id, thread=thread)
     return text
 
@@ -765,7 +791,7 @@ async def rewrite_draft(draft_id: uuid.UUID) -> None:
         client = HttpSlackClient(token)
         try:
             thread = await _current_thread(client, draft)
-            if not thread.pending:
+            if answered(draft, thread):
                 # 그사이 내가 답했다. 다시 쓰지 않고 치운다.
                 async with get_sessionmaker().begin() as session:
                     await _clear_drafts(session, owner_id=settings.owner_id, thread=thread)

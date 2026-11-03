@@ -25,6 +25,7 @@ export type Draft = {
   updated_at: string;
   waiting_since: string | null;
   reminders: number;
+  origin: "mention" | "case";
 };
 
 export type ThreadMessage = {

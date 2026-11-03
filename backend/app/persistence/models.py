@@ -21,6 +21,7 @@ from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.domain.tasks.values import (
+    DRAFT_ORIGINS,
     DRAFT_STATUSES,
     FIELD_ORIGINS,
     LINK_RELATIONS,
@@ -155,6 +156,7 @@ class ReplyDraft(Base):
     __tablename__ = "reply_drafts"
     __table_args__ = (
         CheckConstraint(_in_list("status", DRAFT_STATUSES), name="status"),
+        CheckConstraint(_in_list("origin", DRAFT_ORIGINS), name="origin"),
         UniqueConstraint("owner_id", "reference"),
     )
 
@@ -179,6 +181,7 @@ class ReplyDraft(Base):
     # 내 마지막 답 뒤에 나를 처음 부른 시각과, 그 뒤로 더 부른 횟수(리마인드)
     waiting_since: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     reminders: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
+    origin: Mapped[str] = mapped_column(Text, nullable=False, server_default="mention")
     created_at: Mapped[datetime] = _created_at()
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now()

@@ -13,7 +13,7 @@ from sqlalchemy import delete, insert
 
 from app.persistence.db import get_engine, get_sessionmaker
 from app.persistence.models import TrackerRun
-from app.trackers import claude_code, housekeeping, maintenance, slack
+from app.trackers import case_replies, claude_code, housekeeping, maintenance, slack
 
 log = logging.getLogger(__name__)
 
@@ -25,6 +25,8 @@ async def run_all() -> None:
     for name, tracker in (
         ("2325", maintenance),
         ("Slack", slack),
+        # Slack 다음이라야 누가 불러서 만든 초안을 먼저 두고, 남은 건만 미리 쓴다.
+        ("미리 쓰는 회신", case_replies),
         ("Claude Code", claude_code),
         ("정리", housekeeping),
     ):

@@ -9,6 +9,8 @@ LINK_RELATIONS: Final = ("subtask", "blocks", "related")
 SUGGESTION_KINDS: Final = ("complete",)
 SUGGESTION_STATUSES: Final = ("pending", "accepted", "dismissed")
 DRAFT_STATUSES: Final = ("pending", "used", "dismissed")
+# mention: 누가 나를 불러서 쓴 초안. case: 에이전트 결과가 나온 내 2325 건이라 미리 쓴 초안.
+DRAFT_ORIGINS: Final = ("mention", "case")
 
 TaskStatus = Literal["todo", "in_progress", "blocked", "done", "cancelled"]
 Priority = Literal["low", "medium", "high", "urgent"]

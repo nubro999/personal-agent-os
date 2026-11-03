@@ -90,6 +90,7 @@ class DraftOut(BaseModel):
     updated_at: datetime
     waiting_since: datetime | None
     reminders: int
+    origin: str
 
 
 class ThreadMessage(BaseModel):
@@ -152,6 +153,7 @@ async def drafts(
             updated_at=draft.updated_at,
             waiting_since=draft.waiting_since,
             reminders=draft.reminders,
+            origin=draft.origin,
         )
         for draft, title in rows.all()
     ]

@@ -131,6 +131,9 @@ function Row({
     >
       <div className="flex items-baseline gap-2">
         <span className="min-w-0 flex-1 truncate leading-snug">{text}</span>
+        {item.kind === "draft" && item.draft.origin === "case" && (
+          <span className="shrink-0 rounded bg-accent/15 px-1.5 text-xs text-accent">미리 씀</span>
+        )}
         {item.kind === "draft" && item.draft.reminders > 0 && (
           <span className="shrink-0 rounded bg-warn/15 px-1.5 text-xs text-warn">
             리마인드 {item.draft.reminders}
@@ -258,7 +261,9 @@ function DraftPanel({
   return (
     <div className="max-w-3xl">
       <div className="text-xs text-muted">
-        {[cs, task?.project, "답장 초안"].filter(Boolean).join(" / ")}
+        {[cs, task?.project, draft.origin === "case" ? "에이전트 결과로 미리 쓴 회신" : "답장 초안"]
+          .filter(Boolean)
+          .join(" / ")}
       </div>
       <h2 className="mt-1 text-base font-semibold leading-snug">{title}</h2>
       <div className="mt-1 flex gap-2 text-xs">
