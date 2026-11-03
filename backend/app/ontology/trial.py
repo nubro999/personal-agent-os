@@ -1,7 +1,8 @@
 """온톨로지 검증: 에이전트가 온톨로지 조회 도구만으로 끝난 건을 처리할 수 있는지 본다.
 
 그 건의 실행, 진단, 수정안, 변경 항목, 판정, 반영, 수정 기록은 숨긴다. 다른 건의 기록은
-과거 지식이라 보여 준다. 에이전트가 고르는 수정 대상을 실제로 바꾼 대상과 비교한다.
+과거 지식이라 보여 준다. 에이전트가 낸 고칠 대상(바꾸기, 만들기, 지우기)을 실제로 고친 대상과
+비교한다. 있던 것은 id와 카테고리 단위(step은 카테고리로 묶음)로, 새로 만든 것은 이름으로 맞춘다.
 
 config_tree는 지금 운영 설정이라 그 건을 고친 뒤의 내용이다. 고친 대상은 2325 변경 항목의
 고치기 전 본문(before_body)으로 바꿔 보여 주고, 고치며 새로 만든 정보는 숨긴다.
@@ -19,7 +20,7 @@ import logging
 import sys
 from collections import defaultdict
 from datetime import date
-from typing import Any
+from typing import Any, Literal
 
 import pymysql
 from claude_agent_sdk import (
@@ -50,6 +51,8 @@ FIND_LIMIT = 20
 BEFORE = "2325 변경 항목의 고치기 전 본문"
 STEP_HIDDEN = "(이 카테고리는 고쳐졌다. step 본문은 카테고리의 고치기 전 본문에서 본다)"
 NOT_EXISTED = "없다."
+# 새로 만든 것은 id가 없어 이름으로 맞춘다. 글자 두 개씩 겹치는 비율(Dice)이 이 이상이면 같은 것
+SAME_NAME = 0.4
 # 숨길 정답: 건을 처리한 기록
 _WORK = {"run", "diagnosis", "proposal", "test_round", "knowledge_note", "change_item", "review"}
 
@@ -57,7 +60,14 @@ _WORK = {"run", "diagnosis", "proposal", "test_round", "knowledge_note", "change
 class Target(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    id: str = Field(description="고칠 사례의 id (category:..., info:..., step:...)")
+    action: Literal["바꾸기", "만들기", "지우기"]
+    id: str = Field(
+        description="바꾸기, 지우기면 그 사례 id. 만들기면 새 것을 쓸 곳(step이나 카테고리 id)"
+    )
+    concept: str = Field(
+        description="만들기면 새 것의 개념(info, ment, step, category). 아니면 빈 문자열"
+    )
+    name: str = Field(description="만들기면 새 이름. 정보는 [태그]로. 아니면 빈 문자열")
     change: str = Field(description="무엇을 어떻게 바꿀지 한두 문장")
 
 
@@ -275,10 +285,19 @@ def before_bodies(
 
 
 def ontology_tools(view: OntologyView, cutoff: dict[str, int]) -> list[Any]:
-    """온톨로지 조회 네 개와 응대 당시 기록을 읽는 다섯 개. cutoff 뒤의 턴은 읽지 못한다."""
+    """온톨로지 조회 네 개와 그때 읽는 기록 여섯 개. cutoff 뒤의 턴은 읽지 못한다."""
 
     def text(value: Any) -> dict[str, Any]:
         return {"content": [{"type": "text", "text": json.dumps(value, ensure_ascii=False)}]}
+
+    def conversation_before(node_id: str) -> dict[str, Any]:
+        """대화 목록에도 문제 턴 뒤의 턴(사람 상담원의 답, 고친 뒤의 응대)이 있다. 잘라 낸다."""
+        result = live.read_conversation(node_id)
+        turns = result.get("turns")
+        if isinstance(turns, list):
+            kept = [t for t in turns if not after_cutoff(str(t.get("turn") or ""), cutoff)]
+            result = result | {"turns": kept, "cut_after_problem_turn": len(turns) - len(kept)}
+        return result
 
     async def read(reader: Any, node_id: str, *args: Any) -> dict[str, Any]:
         if after_cutoff(node_id, cutoff):
@@ -331,7 +350,7 @@ def ontology_tools(view: OntologyView, cutoff: dict[str, int]) -> list[Any]:
         {"id": str},
     )
     async def read_conversation(args: dict[str, Any]) -> dict[str, Any]:
-        return await read(live.read_conversation, args["id"])
+        return await read(conversation_before, args["id"])
 
     @tool(
         "read_prompt",
@@ -360,6 +379,22 @@ def ontology_tools(view: OntologyView, cutoff: dict[str, int]) -> list[Any]:
     async def read_api_spec(args: dict[str, Any]) -> dict[str, Any]:
         return await read(live.read_api_spec, args["id"])
 
+    @tool(
+        "read_function_spec",
+        "함수 스펙 문서(genlab-tools). section, pattern이 비면 파일별 절 목록. "
+        "section이면 그 절 본문, pattern이면 그 말이 든 줄. file은 spec이나 external-apis. "
+        "id는 function 사례",
+        {"id": str, "section": str, "pattern": str, "file": str},
+    )
+    async def read_function_spec(args: dict[str, Any]) -> dict[str, Any]:
+        return await read(
+            live.read_function_spec,
+            args["id"],
+            args.get("section", ""),
+            args.get("pattern", ""),
+            args.get("file", ""),
+        )
+
     return [
         get_node,
         list_neighbors,
@@ -370,6 +405,7 @@ def ontology_tools(view: OntologyView, cutoff: dict[str, int]) -> list[Any]:
         read_prompt,
         read_tool_logs,
         read_api_spec,
+        read_function_spec,
     ]
 
 
@@ -411,30 +447,99 @@ async def run_trial(
     return parsed, calls, status
 
 
+def step_categories(data: dict[str, Any]) -> dict[str, str]:
+    """step id -> 그 step이 속한 카테고리 id."""
+    return {
+        link["source"]: link["target"]
+        for link in data["links"]
+        if link["name"] == "belongs_to" and link["source"].startswith("step:")
+    }
+
+
+def unit_of(node_id: str, categories: dict[str, str]) -> str:
+    """채점 단위. step은 카테고리로 묶고, 나머지는 그 사례 그대로다."""
+    return categories.get(node_id, node_id)
+
+
+def similarity(a: str, b: str) -> float:
+    def pairs(text: str) -> set[str]:
+        text = "".join(ch for ch in text if ch.isalnum())
+        return {text[i : i + 2] for i in range(len(text) - 1)}
+
+    left, right = pairs(a), pairs(b)
+    return 2 * len(left & right) / (len(left) + len(right)) if left and right else 0.0
+
+
+def score_targets(
+    targets: list[Target],
+    existing: set[str],
+    created: dict[str, str],
+    categories: dict[str, str],
+) -> tuple[dict[str, Any], list[str]]:
+    """(점수, 제안마다 붙일 표시).
+
+    existing: 실제로 바꾼, 고치기 전에도 있던 대상. id와 카테고리 단위로 맞춘다.
+    created: 실제로 새로 만든 대상 id -> 이름. 같은 개념의 만들기 제안과 이름으로 맞춘다.
+    """
+    by_id = {t.id for t in targets if t.action != "만들기"}
+    # 만들기도 그것을 쓸 곳은 고치는 것이라 단위에 넣는다
+    units = {unit_of(t.id, categories) for t in targets}
+    made: dict[str, str] = {}
+    marks: list[str] = []
+    for t in targets:
+        if t.action == "만들기":
+            same = [
+                truth
+                for truth, label in created.items()
+                if truth.split(":", 1)[0] == t.concept and similarity(t.name, label) >= SAME_NAME
+            ]
+            made.update(dict.fromkeys(same, t.name))
+            marks.append(f"새로 만든 것과 같음 {len(same)}개" if same else "")
+        elif t.id in existing:
+            marks.append("일치")
+        elif unit_of(t.id, categories) in {unit_of(e, categories) for e in existing}:
+            marks.append("카테고리 일치")
+        else:
+            marks.append("")
+    id_hit = existing & by_id
+    unit_hit = {e for e in existing if unit_of(e, categories) in units}
+    total = len(existing) + len(created)
+    score = {
+        "existing": len(existing),
+        "created": len(created),
+        "proposed": len(targets),
+        "proposed_create": sum(t.action == "만들기" for t in targets),
+        "id_hit": len(id_hit),
+        "unit_hit": len(unit_hit),
+        "create_hit": len(made),
+        "recall_id": round((len(id_hit) + len(made)) / total, 2) if total else None,
+        "recall_unit": round((len(unit_hit) + len(made)) / total, 2) if total else None,
+    }
+    return score, marks
+
+
 def report(
     case: dict[str, Any],
     data_nodes: dict[str, dict[str, Any]],
     hidden: set[str],
     changed: set[str],
+    categories: dict[str, str],
     result: TrialResult | None,
     calls: list[str],
     status: str,
 ) -> tuple[str, dict[str, Any]]:
-    proposed = {t.id for t in result.targets} if result else set()
-    hit = proposed & changed
+    existing = changed - hidden
+    created = {i: data_nodes[i]["label"] for i in changed & hidden}
+    targets = result.targets if result else []
+    score, marks = score_targets(targets, existing, created, categories)
+    proposed_units = {unit_of(t.id, categories) for t in targets}
     truth_text = []
     for i in sorted(hidden):
         node = data_nodes[i]
         if node["concept"] in ("diagnosis", "fix_record"):
             detail = (node.get("detail") or "")[:200]
             truth_text.append(f"- {node['concept']} `{i}`: {node['label']} — {detail}")
-    score = {
-        "proposed": len(proposed),
-        "changed": len(changed),
-        "hit": len(hit),
-        "recall": round(len(hit) / len(changed), 2) if changed else None,
-        "precision": round(len(hit) / len(proposed), 2) if proposed else None,
-    }
+    total = score["existing"] + score["created"]
     lines = [
         f"# 온톨로지 검증 {case['label']}",
         "",
@@ -442,8 +547,11 @@ def report(
         f"- 요청: {case.get('detail', '')}",
         f"- 실행: {status}, 도구 호출 {len(calls)}번, 모델 {MODEL}",
         f"- 숨긴 정답 노드 {len(hidden)}개",
-        f"- 수정 대상 일치: 실제 {score['changed']}개 중 {score['hit']}개, "
-        f"제안 {score['proposed']}개",
+        f"- 실제로 고친 것 {total}개(있던 것 {score['existing']}, 새로 만든 것 "
+        f"{score['created']}), 제안 {score['proposed']}개(만들기 {score['proposed_create']})",
+        f"- id 기준 {score['id_hit'] + score['create_hit']} / {total}, "
+        f"카테고리 기준 {score['unit_hit'] + score['create_hit']} / {total} "
+        f"(새로 만든 것 {score['create_hit']} / {score['created']})",
         "",
         "## 에이전트 결과",
         "",
@@ -459,8 +567,12 @@ def report(
             "**고칠 대상**",
             "",
             *(
-                f"- `{t.id}` {'(일치)' if t.id in changed else ''}: {t.change}"
-                for t in result.targets
+                f"- {t.action} `{t.id}`"
+                + (f" 새 {t.concept} {t.name}" if t.action == "만들기" else "")
+                + (f" ({mark})" if mark else "")
+                + ("" if t.id in data_nodes else " (없는 id)")
+                + f": {t.change}"
+                for t, mark in zip(targets, marks, strict=True)
             ),
             "",
             f"**확신:** {result.confidence}",
@@ -479,7 +591,21 @@ def report(
         "",
         "**바꾼 대상**",
         "",
-        *(f"- `{i}` {'(맞힘)' if i in hit else ''}" for i in sorted(changed)),
+        *(
+            f"- `{i}`"
+            + (" (맞힘)" if i in {t.id for t in targets} else "")
+            + (
+                " (카테고리로 맞힘)"
+                if i not in {t.id for t in targets} and unit_of(i, categories) in proposed_units
+                else ""
+            )
+            for i in sorted(existing)
+        ),
+        "",
+        "**새로 만든 것**",
+        "",
+        *(f"- `{i}` {label}" for i, label in sorted(created.items())),
+        *([] if created else ["- 없음"]),
         "",
         *truth_text,
         "",
@@ -523,6 +649,7 @@ async def main_async(case_ids: list[str]) -> None:
     root = get_settings().ontology_dir
     data, concepts, definitions = load_ontology()
     data_nodes = {n["id"]: n for n in data["nodes"]}
+    categories = step_categories(data)
     out_dir = root / "검증"
     out_dir.mkdir(exist_ok=True)
     for case_id in case_ids:
@@ -538,7 +665,7 @@ async def main_async(case_ids: list[str]) -> None:
         )
         result, calls, status = await run_trial(view, case_id, turn_cutoff(data, case_id))
         text, score = report(
-            data_nodes[case_id], data_nodes, hidden, changed, result, calls, status
+            data_nodes[case_id], data_nodes, hidden, changed, categories, result, calls, status
         )
         name = data_nodes[case_id]["label"].split()[0]
         path = out_dir / f"{date.today().isoformat()}_{name}.md"

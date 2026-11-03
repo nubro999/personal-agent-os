@@ -14,6 +14,11 @@ from app.ontology.instances import Graph, Node
 
 CONTENT_LIMIT = 1200
 SOURCE = "ai-admin config_tree"
+# 기본 매뉴얼은 카테고리 테이블이 아니라 회사 프롬프트에 있다. 고칠 곳도 회사 프롬프트다.
+FALLBACK = "그 외 문의 응대 매뉴얼"
+FALLBACK_SOURCE = "ai-admin company_prompts.main_prompt (회사 프롬프트 기본 매뉴얼, 카테고리 아님)"
+STEP_HEAD = re.compile(r"^step(\d+)\s*$", re.MULTILINE)
+GOTO = re.compile(r"goto\s+step(\d+)")
 
 
 def _text(value: Any, limit: int = CONTENT_LIMIT) -> str:
@@ -71,6 +76,54 @@ def add_admin(graph: Graph, admin_dir: Path) -> None:
         read += 1
         _add_company(graph, tree["root"], bot, config)
     graph.measure("봇 구성 → config_tree", read, len(graph.bot_config))
+    fallback = admin_dir / "fallback_manual.json"
+    if fallback.is_file():
+        add_fallback_manual(graph, json.loads(fallback.read_text(encoding="utf-8")))
+
+
+def fallback_steps(section: str) -> dict[int, str]:
+    """기본 매뉴얼 절의 Response Manual을 step 번호별 본문으로 나눈다."""
+    manual = section.split("### Response Template", 1)[0]
+    heads = list(STEP_HEAD.finditer(manual))
+    return {
+        int(head.group(1)): manual[head.end() : nxt.start() if nxt else None].strip()
+        for head, nxt in zip(heads, [*heads[1:], None], strict=True)
+    }
+
+
+def fallback_category(bot: str) -> str:
+    return f"category:{bot}:{FALLBACK}"
+
+
+def add_fallback_manual(graph: Graph, sections: dict[str, str]) -> None:
+    """봇 구성마다 기본 매뉴얼을 카테고리 사례 하나와 그 step으로 넣는다."""
+    added = 0
+    for company_id, section in sections.items():
+        bot = graph.company_bot.get(int(company_id))
+        config = graph.bot_config.get(bot or "")
+        if bot is None or config is None:
+            continue
+        node = graph.add(Node(fallback_category(bot), FALLBACK, "category"))
+        graph.nodes[node].detail = _text(section)
+        graph.nodes[node].source = FALLBACK_SOURCE
+        graph.nodes[node].real_key = f"{company_id}:prod:{FALLBACK}"
+        graph.link(node, config, "belongs_to")
+        steps = fallback_steps(section)
+        for number, body in steps.items():
+            step = graph.add(Node(f"step:{bot}:{FALLBACK}:{number}", f"step {number}", "step"))
+            graph.nodes[step].detail = _text(body)
+            graph.nodes[step].source = FALLBACK_SOURCE
+            graph.link(step, node, "belongs_to")
+        for number, body in steps.items():
+            for target in GOTO.findall(body):
+                if int(target) in steps:
+                    graph.link(
+                        f"step:{bot}:{FALLBACK}:{number}",
+                        f"step:{bot}:{FALLBACK}:{target}",
+                        "next",
+                    )
+        added += 1
+    graph.measure("봇 구성 → 기본 매뉴얼", added, len(graph.bot_config))
 
 
 def _add_company(graph: Graph, root: dict[str, Any], bot: str, config: str) -> None:

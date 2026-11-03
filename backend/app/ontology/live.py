@@ -188,3 +188,27 @@ def read_api_spec(node_id: str) -> dict[str, Any]:
     if "error" in data:
         return data
     return {"id": node_id, "functions": data.get("functions"), "found": data.get("found", True)}
+
+
+def read_function_spec(
+    node_id: str, section: str = "", pattern: str = "", file: str = ""
+) -> dict[str, Any]:
+    """genlab-tools 스펙 문서. 호출 흐름, 비즈니스 로직, 바깥 시스템 칸의 뜻이 여기에만 있다."""
+    db, name = _parse(node_id, "function")
+    args = ["--brand", db, "--fn", name]
+    if pattern:
+        data = auto_cs.toolspec(
+            get_settings().auto_cs_dir, "grep", *args, "--pattern", pattern, "--limit", "30"
+        )
+    else:
+        if file:
+            args += ["--file", file]
+        if section:
+            args += ["--section", section]
+        data = auto_cs.toolspec(get_settings().auto_cs_dir, "fn", *args)
+    if "error" in data:
+        return {"error": data["error"]}
+    for key in ("본문", "전문"):
+        if key in data:
+            data[key] = _clip(data[key], SECTION_LIMIT)
+    return {"id": node_id, **data}

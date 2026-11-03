@@ -4,6 +4,7 @@ from typing import Any
 
 from app.ontology.instances import BrandIndex, Graph, Node
 from app.ontology.instances_2325 import _brand_of
+from app.ontology.instances_admin import FALLBACK, fallback_category
 
 # 인용이나 이관 사유로 찾은 문제 턴은 근거가 있고, 나머지는 짐작이 섞인다.
 _FIRM_METHODS = {"인용 일치", "이관 사유"}
@@ -69,6 +70,8 @@ def add_chat(graph: Graph, chat: dict[str, Any], brands: BrandIndex) -> None:
     graph.measure("대화 → 브랜드", linked_brand, len(chat["conversations"]))
 
     judged = selected = visited = visited_total = 0
+    fallback = {"sole": 0, "with": 0}
+    overruled = 0
     for row in chat["turns"]:
         conversation = f"conversation:{row['db']}:{row['room']}"
         turn = graph.add(
@@ -87,6 +90,13 @@ def add_chat(graph: Graph, chat: dict[str, Any], brands: BrandIndex) -> None:
         for item in manuals:
             graph.link(turn, _category(graph, bot, item, ids), "selected")
             selected += 1
+        # 기본 매뉴얼은 판정기가 모른다. CoT가 썼다고 하면 판정기 결과는 두고 더한다.
+        use = row.get("fallback") or ""
+        base = fallback_category(bot)
+        if use and base in graph.nodes:
+            graph.link(turn, base, "selected", "추정")
+            fallback[use] += 1
+            overruled += use == "sole" and bool(manuals)
         for tag in row.get("tags") or []:
             graph.link(turn, _info(graph, bot, tag), "loaded", "추정")
         for index, name in enumerate(row.get("functions") or []):
@@ -101,8 +111,13 @@ def add_chat(graph: Graph, chat: dict[str, Any], brands: BrandIndex) -> None:
             graph.link(call, turn, "belongs_to")
             graph.link(call, _function(graph, bot, name), "invokes")
         # 매뉴얼이 하나일 때만 CoT의 step 번호가 어느 매뉴얼 것인지 알 수 있다.
-        if len(manuals) == 1:
+        # 기본 매뉴얼만 썼다고 하면 step 번호는 기본 매뉴얼 것이다.
+        category = None
+        if use == "sole" and base in graph.nodes:
+            category = FALLBACK
+        elif len(manuals) == 1 and not use:
             category = manuals[0]["category"]
+        if category:
             for number in row.get("steps") or []:
                 visited_total += 1
                 step = f"step:{bot}:{category}:{number}"
@@ -111,19 +126,28 @@ def add_chat(graph: Graph, chat: dict[str, Any], brands: BrandIndex) -> None:
                     visited += 1
     graph.measure("턴 → 고른 매뉴얼 판정 있음", judged, len(chat["turns"]))
     graph.measure("턴 step 번호 → step 사례", visited, visited_total)
+    graph.measure("턴 → 기본 매뉴얼만 (CoT)", fallback["sole"], len(chat["turns"]))
+    graph.measure("턴 → 기본 매뉴얼과 함께 (CoT)", fallback["with"], len(chat["turns"]))
+    graph.measure("기본 매뉴얼만인데 판정기는 다른 매뉴얼", overruled, fallback["sole"])
 
-    firm = 0
+    firm = linked = 0
     for row in chat["problems"]:
         case = f"case:{row['item_key']}"
         conversation = f"conversation:{row['db']}:{row['room']}"
         if case not in graph.nodes:
             continue
-        graph.link(case, conversation, "refers_to")
+        graph.link(
+            case, conversation, "refers_to", "추정" if row.get("found_by") == "agent" else "확정"
+        )
         turn = f"turn:{row['db']}:{row.get('turn')}"
         if turn in graph.nodes:
             sure = row.get("method") in _FIRM_METHODS
             graph.link(case, turn, "refers_to", "확정" if sure else "추정")
             firm += sure
+            linked += 1
+    cases = sum(1 for node in graph.nodes.values() if node.concept == "case")
+    graph.measure("건 → 대화", len(chat["problems"]), cases)
+    graph.measure("건 → 문제 턴", linked, cases)
     graph.measure("건 → 문제 턴 인용 근거", firm, len(chat["problems"]))
     for db_name, reason in chat.get("skipped", {}).items():
         graph.unread_chat_dbs.append(f"{db_name} ({reason})")

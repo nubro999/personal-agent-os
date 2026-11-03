@@ -50,6 +50,7 @@ select = ["E", "F", "I", "B", "UP", "SIM", "ASYNC"]
 "app/trackers/prompts.py" = ["E501"]
 "app/ontology/prompts.py" = ["E501"]
 "app/reply/prompts.py" = ["E501"]
+"app/ontology/builder_prompts.py" = ["E501"]
 
 [tool.mypy]
 python_version = "3.12"

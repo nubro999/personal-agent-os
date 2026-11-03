@@ -7,7 +7,16 @@ from httpx import AsyncClient
 from app.config import get_settings
 from app.ontology.build import build
 from app.ontology.concepts import ConceptError, load_concepts, load_verbs
-from app.ontology.source_chat import read_db, selected_manuals, slim_turn, visited_steps
+from app.ontology.instances_admin import fallback_steps
+from app.ontology.source_admin import fallback_section
+from app.ontology.source_chat import (
+    fallback_use,
+    read_db,
+    selected_manuals,
+    slim_turn,
+    visited_steps,
+    with_found_chat_ids,
+)
 
 CONCEPT = """---
 id: {id}
@@ -684,3 +693,112 @@ def test_response_fields_carry_code_meaning_and_glossary(ontology: tuple[Path, P
     assert "delivered_on" in detail and "반송 배송 완료 시에만" in detail
     assert "값 날짜: 택배 배달 완료일 / 처리: 입고일로 읽지 않는다" in detail
     assert "| 상태 사전 값 → 응답 칸 | 1 | 2 | 50% |" in gaps
+
+
+def test_found_chat_ids_fill_only_empty_cases_and_prefer_people() -> None:
+    cases = [
+        {"item_key": "own", "chat_id": "c0"},
+        {"item_key": "human", "chat_id": ""},
+        {"item_key": "agent", "chat_id": ""},
+        {"item_key": "none", "chat_id": ""},
+    ]
+    found = [
+        {"item_key": "own", "user_chat_id": "x", "found_by": "human"},
+        {"item_key": "human", "user_chat_id": "h", "found_by": "human"},
+        {"item_key": "human", "user_chat_id": "a", "found_by": "agent"},
+        {"item_key": "agent", "user_chat_id": "a1", "found_by": "agent"},
+        {"item_key": "agent", "user_chat_id": "a2", "found_by": "agent"},
+    ]
+
+    assert with_found_chat_ids(cases, found) == [
+        {"item_key": "own", "chat_id": "c0"},
+        {"item_key": "human", "chat_id": "h", "found_by": "human"},
+        {"item_key": "agent", "chat_id": "a2", "found_by": "agent"},
+    ]
+
+
+FALLBACK_SECTION = """## 그 외 문의 응대 매뉴얼
+
+### Response Manual
+
+step1
+Goal:
+    Information으로 의문을 해결
+Exception:
+    case 답하기 어려운 경우:
+        goto step999
+
+
+step999
+Goal:
+담당 매니저를 연결
+
+### Response Template
+
+[연결 멘트]"""
+
+
+def cots(choice: str) -> str:
+    return json.dumps([json.dumps({"매뉴얼 선택 과정": choice}, ensure_ascii=False)])
+
+
+def test_fallback_use_reads_only_what_the_bot_said_it_used() -> None:
+    sole = "감사 인사입니다. 간단한 마무리는 가능하므로 그 외 문의 응대 매뉴얼을 사용한다."
+    both = "2번째 응대 매뉴얼을 사용한다. 답이 없는 부분은 그 외 문의 응대 매뉴얼을 함께 이용한다."
+    maybe = "1번째 매뉴얼을 사용한다. 필요 시 그 외 문의 응대 매뉴얼 step999로 이어질 수 있음."
+    assert fallback_use(cots(sole)) == "sole"
+    assert fallback_use(cots(both)) == "with"
+    assert fallback_use(cots(maybe)) == ""
+    assert fallback_use(cots("그 외 문의 응대 맥락이 관련됨.")) == ""
+    assert fallback_use(None) == "" and fallback_use(json.dumps(["글"])) == ""
+
+
+def test_fallback_section_stops_at_the_next_header() -> None:
+    prompt = f"# 지침\n\n{FALLBACK_SECTION}\n\n## Response Style\n짧게"
+    assert fallback_section(prompt) == FALLBACK_SECTION
+    assert fallback_section("## 다른 절") is None and fallback_section(None) is None
+    steps = fallback_steps(FALLBACK_SECTION)
+    assert sorted(steps) == [1, 999]
+    assert "goto step999" in steps[1] and "[연결 멘트]" not in steps[999]
+
+
+def test_fallback_manual_is_a_category_and_cot_links_turns_to_it(
+    ontology: tuple[Path, Path],
+) -> None:
+    root, context = ontology
+    write_json(root / "source/admin/240_prod.json", config_tree())
+    write_json(root / "source/admin/fallback_manual.json", {"240": FALLBACK_SECTION})
+    chat = chat_rows()
+    sole = {
+        **RAW_TURN,
+        "id": 13,
+        "ai_cots": cots("마무리이므로 그 외 문의 응대 매뉴얼을 사용한다. step1"),
+    }
+    both = {
+        **RAW_TURN,
+        "id": 14,
+        "ai_cots": cots("2번째와 그 외 문의 응대 매뉴얼을 함께 이용. step1"),
+    }
+    chat["turns"] = [slim_turn("oa_v2", sole), slim_turn("oa_v2", both)]  # type: ignore[index]
+
+    data, gaps = build(root, context, rows_2325(), chat)
+
+    nodes = {n["id"]: n for n in data["nodes"]}
+    links = {(x["source"], x["name"], x["target"]): x["confidence"] for x in data["links"]}
+    base = "category:oa_v2:그 외 문의 응대 매뉴얼"
+    step1, step999 = "step:oa_v2:그 외 문의 응대 매뉴얼:1", "step:oa_v2:그 외 문의 응대 매뉴얼:999"
+    assert (
+        "company_prompts" in nodes[base]["source"]
+        and nodes[base]["real_key"] == "240:prod:그 외 문의 응대 매뉴얼"
+    )
+    assert (base, "belongs_to", "bot_config:240") in links
+    assert (step1, "belongs_to", base) in links and (step1, "next", step999) in links
+    # 판정기 결과는 두고, CoT가 쓴 기본 매뉴얼을 추정으로 더한다.
+    for turn in ("turn:oa_v2:13", "turn:oa_v2:14"):
+        assert links[(turn, "selected", "category:oa_v2:A/S문의")] == "확정"
+        assert links[(turn, "selected", base)] == "추정"
+    # 이것만 썼다고 하면 step 번호는 기본 매뉴얼 것이고, 함께 썼으면 어느 것인지 몰라 잇지 않는다.
+    assert links[("turn:oa_v2:13", "visited", step1)] == "추정"
+    assert ("turn:oa_v2:13", "visited", "step:oa_v2:A/S문의:1") not in links
+    assert not any(k[0] == "turn:oa_v2:14" and k[1] == "visited" for k in links)
+    assert "| 기본 매뉴얼만인데 판정기는 다른 매뉴얼 | 1 | 1 | 100% |" in gaps

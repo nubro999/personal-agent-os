@@ -3,9 +3,12 @@ from typing import Any
 from app.ontology.trial import (
     STEP_HIDDEN,
     OntologyView,
+    Target,
     change_targets,
     hidden_for,
+    score_targets,
     settle_hidden,
+    similarity,
 )
 
 
@@ -101,3 +104,32 @@ def test_pre_fix_body_wins_over_the_evidence_rule() -> None:
 
     # 고치기 전이 "없다"였으면 새로 만든 것이라 숨긴다.
     assert "category:x" in settle_hidden(hidden, {}, {"category:x"})
+
+
+def target(action: str, node_id: str, concept: str = "", name: str = "") -> Target:
+    return Target.model_validate(
+        {"action": action, "id": node_id, "concept": concept, "name": name, "change": ""}
+    )
+
+
+def test_steps_score_by_category_and_new_items_by_name() -> None:
+    categories = {"step:b:반품:5": "category:b:반품", "step:b:교환:5": "category:b:교환"}
+    existing = {"category:b:반품", "category:b:교환", "info:b:[날짜 해석]"}
+    created = {"info:b:[라이브 시청 방법·혜택]": "[라이브 시청 방법·혜택]"}
+    targets = [
+        target("바꾸기", "step:b:반품:5"),
+        target("바꾸기", "info:b:[날짜 해석]"),
+        target("만들기", "category:b:할인", "info", "[라이브 시청 방법과 혜택 안내]"),
+        target("만들기", "category:b:할인", "ment", "[라이브 시청 방법·혜택]"),
+    ]
+
+    score, marks = score_targets(targets, existing, created, categories)
+
+    assert marks == ["카테고리 일치", "일치", "새로 만든 것과 같음 1개", ""]
+    assert (score["id_hit"], score["unit_hit"], score["create_hit"]) == (1, 2, 1)
+    assert (score["recall_id"], score["recall_unit"]) == (0.5, 0.75)
+
+
+def test_similarity_ignores_brackets_and_punctuation() -> None:
+    assert similarity("[반송수령일자 해석]", "반송수령일자해석") == 1.0
+    assert similarity("[반송수령일자 해석]", "[카카오 라이브]") == 0.0

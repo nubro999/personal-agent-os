@@ -22,6 +22,11 @@ log = logging.getLogger(__name__)
 
 BATCH = 200
 STEP_RE = re.compile(r"step\s?(\d+)", re.I)
+FALLBACK_NAME = "그 외 문의 응대"
+# CoT "매뉴얼 선택 과정"에서 기본 매뉴얼을 말한 문장을 가른다. 조건만 단 말은 쓴 것이 아니다.
+FALLBACK_IF = re.compile(r"필요\s?시|병행 가능|보완 가능|수 있|생기면|어려우면|불가\s?시")
+FALLBACK_WITH = re.compile(r"함께|병행|및|모두")
+FALLBACK_USE = re.compile(r"사용|이용|처리|마무리|응대한다|활용")
 Finder = Callable[..., dict[str, Any]]
 
 TURNS_SQL = """
@@ -91,6 +96,30 @@ def visited_steps(ai_cots: Any) -> list[int]:
     return seen
 
 
+def manual_choice(ai_cots: Any) -> str:
+    """CoT의 첫 항목에서 "매뉴얼 선택 과정" 글."""
+    cots = _json(ai_cots)
+    first = _json(cots[0]) if isinstance(cots, list) and cots else None
+    text = first.get("매뉴얼 선택 과정") if isinstance(first, dict) else None
+    return text if isinstance(text, str) else ""
+
+
+def fallback_use(ai_cots: Any) -> str:
+    """기본 매뉴얼을 썼다고 했나. sole(이것만), with(다른 매뉴얼과 함께), ""(안 씀, 조건만).
+
+    봇이 쓴 글로 가르므로 추정이다. 글은 버리고 이 값만 남긴다.
+    """
+    found = ""
+    for sentence in re.split(r"(?<=[.。])\s+", manual_choice(ai_cots)):
+        if FALLBACK_NAME not in sentence or FALLBACK_IF.search(sentence):
+            continue
+        if FALLBACK_WITH.search(sentence):
+            return "with"
+        if FALLBACK_USE.search(sentence):
+            found = "sole"
+    return found
+
+
 def slim_turn(db: str, row: dict[str, Any]) -> dict[str, Any]:
     """저장할 칸만 남긴다. question, ai_answer, ai_cots 원문은 여기서 버린다."""
     return {
@@ -104,6 +133,7 @@ def slim_turn(db: str, row: dict[str, Any]) -> dict[str, Any]:
         "tags": _flat(row.get("tags")),
         "functions": _flat(row.get("functions")),
         "steps": visited_steps(row.get("ai_cots")),
+        "fallback": fallback_use(row.get("ai_cots")),
     }
 
 
@@ -147,6 +177,8 @@ def read_db(
         if case_room is None:
             continue
         link = {"item_key": case["item_key"], "db": db, "room": case_room["id"]}
+        if "found_by" in case:
+            link["found_by"] = case["found_by"]
         if finder is not None:
             turns = by_room.get(case_room["id"], [])
             found = finder(case.get("feedback"), turns, case_room)
@@ -157,6 +189,28 @@ def read_db(
             }
         out["problems"].append(link)
     return out
+
+
+def with_found_chat_ids(
+    cases: list[dict[str, Any]], found: list[dict[str, Any]]
+) -> list[dict[str, Any]]:
+    """건에 대화 id가 없으면 따로 찾아 둔 id를 쓴다. 사람이 찾은 것을 먼저, 그다음 최근 것.
+
+    found는 created_at 오름차순이다. 어느 쪽도 없는 건은 뺀다.
+    """
+    best: dict[str, dict[str, Any]] = {}
+    for row in found:
+        current = best.get(row["item_key"])
+        if current is None or row["found_by"] == "human" or current["found_by"] != "human":
+            best[row["item_key"]] = row
+    result: list[dict[str, Any]] = []
+    for case in cases:
+        if case["chat_id"]:
+            result.append(case)
+        elif case["item_key"] in best:
+            row = best[case["item_key"]]
+            result.append(case | {"chat_id": row["user_chat_id"], "found_by": row["found_by"]})
+    return result
 
 
 def real_db_names(auto_cs_dir: Path) -> dict[str, str]:
@@ -175,10 +229,14 @@ def fetch_chat(env_file: Path, port: int, auto_cs_dir: Path) -> dict[str, Any]:
         with main.cursor(pymysql.cursors.DictCursor) as cur:
             cur.execute("SET SESSION TRANSACTION READ ONLY")
             cur.execute(
-                "SELECT item_key, db_name, chat_id, feedback FROM wi_ax_item "
-                "WHERE chat_id <> '' AND db_name <> ''"
+                "SELECT item_key, db_name, chat_id, feedback FROM wi_ax_item WHERE db_name <> ''"
             )
-            cases: list[dict[str, Any]] = list(cur.fetchall())
+            items: list[dict[str, Any]] = list(cur.fetchall())
+            cur.execute(
+                "SELECT item_key, user_chat_id, found_by FROM maintenance_chat_id "
+                "WHERE user_chat_id <> '' ORDER BY created_at"
+            )
+            cases = with_found_chat_ids(items, list(cur.fetchall()))
     finally:
         main.close()
 

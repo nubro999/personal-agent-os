@@ -1,3 +1,4 @@
+import json
 from pathlib import Path
 from typing import Any
 
@@ -111,3 +112,54 @@ def test_trial_cannot_read_turns_after_the_problem_turn() -> None:
     assert after_cutoff("turn:mommycare:101", cutoff)
     assert not after_cutoff("turn:oa_v2:999", cutoff)
     assert not after_cutoff("conversation:mommycare:5", cutoff)
+
+
+def test_read_function_spec_lists_opens_and_greps(monkeypatch: pytest.MonkeyPatch) -> None:
+    seen: list[tuple[str, ...]] = []
+
+    def toolspec(_dir: Path, *args: str) -> dict[str, Any]:
+        seen.append(args)
+        return {"본문": "가" * 30000}
+
+    monkeypatch.setattr(live.auto_cs, "toolspec", toolspec)
+    base = ("--brand", "oa_v2", "--fn", "get_order")
+    node = "function:oa_v2:get_order"
+
+    live.read_function_spec(node)
+    opened = live.read_function_spec(node, "비즈니스 로직", file="external-apis")
+    live.read_function_spec(node, pattern="네이버페이")
+
+    assert seen[0] == ("fn", *base)
+    assert seen[1] == ("fn", *base, "--file", "external-apis", "--section", "비즈니스 로직")
+    assert seen[2] == ("grep", *base, "--pattern", "네이버페이", "--limit", "30")
+    assert opened["id"] == node
+    assert opened["본문"].endswith("생략)")
+
+
+def test_read_function_spec_returns_only_the_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        live.auto_cs, "toolspec", lambda _dir, *args: {"error": "없다", "커밋": "a"}
+    )
+    assert live.read_function_spec("function:oa_v2:x") == {"error": "없다"}
+    with pytest.raises(ValueError):
+        live.read_function_spec("turn:oa_v2:1")
+
+
+async def test_trial_conversation_drops_turns_after_the_problem_turn(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.ontology.trial import OntologyView, ontology_tools
+
+    def fake(node_id: str) -> dict[str, object]:
+        turns = [{"turn": f"turn:mommycare:{n}", "answer": str(n)} for n in (99, 100, 101)]
+        return {"id": node_id, "turns": turns}
+
+    monkeypatch.setattr(live, "read_conversation", fake)
+    view = OntologyView({"nodes": [], "links": []}, {}, {}, set())
+    [tool] = [t for t in ontology_tools(view, {"mommycare": 100}) if t.name == "read_conversation"]
+
+    result = await tool.handler({"id": "conversation:mommycare:5"})
+
+    body = json.loads(result["content"][0]["text"])
+    assert [t["turn"] for t in body["turns"]] == ["turn:mommycare:99", "turn:mommycare:100"]
+    assert body["cut_after_problem_turn"] == 1
