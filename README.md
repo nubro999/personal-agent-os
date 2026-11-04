@@ -101,7 +101,7 @@ infra/systemd/install.sh   # 아래 서비스와 타이머 전부 등록
 
 ## 업무 자동 트래킹 (Slack 멘션, DM)
 
-내 계정 user token(`SLACK_MY_TOKEN`, `~/.config/genlab-overmind/secrets.json`, Slack 앱 personal-os)으로 나(`PAO_SLACK_USER_ID`)를 멘션한 메시지와 DM, 그룹 DM을 최근 3일치 읽는다. Slack에 쓰기는 하지 않는다. 키를 바꾸려면 `PAO_SLACK_TOKEN_KEY`.
+내 계정 user token(`SLACK_USER_TOKEN`, `~/.config/genlab-overmind/secrets.json`)으로 나(`PAO_SLACK_USER_ID`)를 멘션한 메시지와 DM, 그룹 DM을 최근 3일치 읽는다. Slack에 쓰는 것은 보드의 보내기 버튼을 눌렀을 때뿐이다. 키를 바꾸려면 `PAO_SLACK_TOKEN_KEY`.
 - 스레드 단위로 본다. 나를 멘션한 마지막 메시지가 내 마지막 메시지보다 뒤면 내 차례다.
 - 내 차례인 스레드만 Claude가 요청, 해결 보고, 참고로 나눈다.
 - 루트에 CS 번호가 있으면 내 2325 Task에 잇는다. 요청이 왔는데 Task가 막힘이면 진행 중으로 바꾸고, 해결 보고면 완료 제안을 남긴다. 내 2325 Task가 없는 CS 스레드는 남의 담당이라 건너뛴다.
