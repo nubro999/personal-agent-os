@@ -157,6 +157,9 @@ class HttpSlackClient:
         response = await self._http.post("chat.postMessage", json=body)
         response.raise_for_status()
         data: dict[str, Any] = response.json()
+        if data.get("error") == "missing_scope":
+            needed = data.get("needed") or "chat:write"
+            raise RuntimeError(f"이 Slack 토큰에는 보내기 권한({needed})이 없어요")
         if not data.get("ok"):
             raise RuntimeError(f"slack chat.postMessage failed: {data.get('error')}")
         return str(data["ts"])
@@ -736,9 +739,8 @@ async def send_draft(draft_id: uuid.UUID, text: str, client: SlackClient | None 
         raise SendError("보낼 초안이 없다")
     own = client is None
     if client is None:
-        token = await asyncio.to_thread(
-            _load_token, settings.slack_token_file, settings.slack_token_key
-        )
+        key = settings.slack_send_token_key or settings.slack_token_key
+        token = await asyncio.to_thread(_load_token, settings.slack_token_file, key)
         client = HttpSlackClient(token)
     try:
         if draft.thread_ts:

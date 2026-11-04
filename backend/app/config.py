@@ -29,6 +29,8 @@ class Settings(BaseSettings):
     slack_user_id: str = "U0BD9BYJXB8"
     slack_token_file: Path = Path("~/.config/genlab-overmind/secrets.json")
     slack_token_key: str = "SLACK_USER_TOKEN"
+    # 보내기에만 쓸 토큰 키. 읽는 토큰에 chat:write가 없을 때 따로 둔다. 비우면 slack_token_key
+    slack_send_token_key: str | None = None
     slack_lookback_days: int = 3
     slack_team_id: str = "T05NS1KHKUH"
     # 건 카드 스레드가 서는 채널(유지보수-고객성공팀). 이 채널의 건 초안은 건 회신 에이전트가 쓴다.
