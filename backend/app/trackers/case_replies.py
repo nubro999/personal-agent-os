@@ -219,7 +219,9 @@ async def run_once() -> str | None:
             slack._load_token, settings.slack_token_file, settings.slack_token_key
         )
     except (OSError, KeyError, ValueError) as exc:
-        return f"Slack 토큰을 읽지 못함: {type(exc).__name__}"
+        # 토큰이 없으면 아무것도 쓰지 못한다. 로그에도 남겨야 조용히 멈춘 줄 안다.
+        log.warning("case reply tracker skipped: %s %r", settings.slack_token_key, exc)
+        return f"Slack 토큰을 읽지 못함: {settings.slack_token_key} {type(exc).__name__}"
     client = slack.HttpSlackClient(token)
     try:
         stats = await run(client)

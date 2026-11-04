@@ -29,7 +29,7 @@ def _line(task: Task) -> str:
     return " ".join(parts)
 
 
-async def _failed_trackers(session: AsyncSession, now: datetime) -> list[str]:
+async def failed_trackers(session: AsyncSession, now: datetime) -> list[str]:
     """각 수집기의 마지막 실행이 실패면 사유를 돌려준다."""
     rows = await session.execute(
         select(TrackerRun.name, TrackerRun.ok, TrackerRun.detail, TrackerRun.finished_at)
@@ -56,7 +56,7 @@ async def build_briefing(
         if t.source != "natural_language" and t.created_at >= now - NEW_TASK_WINDOW
     ]
     suggestions = await list_pending_suggestions(session, owner_id=owner_id)
-    failed = await _failed_trackers(session, now)
+    failed = await failed_trackers(session, now)
     drafts = (
         await session.scalar(
             select(func.count())

@@ -5,6 +5,7 @@ import {
   dismissDraft,
   dismissSuggestion,
   getDrafts,
+  getFailedTrackers,
   getTasks,
   getThread,
   sendDraft,
@@ -453,14 +454,21 @@ export function Board() {
   const [kanban, setKanban] = useState(false);
   const [folded, setFolded] = useState<Set<string>>(new Set());
   const [error, setError] = useState<string | null>(null);
+  // 마지막 실행이 실패한 수집기. 초안이 안 생기는 이유가 여기 보인다.
+  const [failed, setFailed] = useState<string[]>([]);
   const root = useRef<HTMLDivElement>(null);
   const search = useRef<HTMLInputElement>(null);
 
   const load = useCallback(async () => {
     try {
-      const [nextTasks, nextDrafts] = await Promise.all([getTasks(), getDrafts()]);
+      const [nextTasks, nextDrafts, nextFailed] = await Promise.all([
+        getTasks(),
+        getDrafts(),
+        getFailedTrackers().catch(() => []),
+      ]);
       setTasks(nextTasks);
       setDrafts(nextDrafts);
+      setFailed(nextFailed);
       setError(null);
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : "불러오지 못했어요");
@@ -629,6 +637,11 @@ export function Board() {
         />
       </div>
       {error && <div className="px-4 pt-2 text-sm text-warn">{error}</div>}
+      {failed.length > 0 && (
+        <div className="border-b border-warn/40 bg-warn/10 px-4 py-1.5 text-xs text-warn">
+          수집기가 멈췄어요. {failed.join(" / ")}
+        </div>
+      )}
 
       {kanban ? (
         <div className="grid min-h-0 flex-1 gap-3 p-4 md:grid-cols-3">

@@ -202,3 +202,17 @@ async def test_send_reports_why_it_did_not_send(
     assert (await client.post(url, json={"text": "처리했습니다"})).json() == {
         "sent": "<@U2> 처리했습니다"
     }
+
+
+async def test_failed_trackers_are_listed_for_the_board(client: AsyncClient) -> None:
+    from app.persistence.models import TrackerRun
+
+    name = f"시험-{uuid.uuid4()}"
+    async with get_sessionmaker().begin() as session:
+        session.add(TrackerRun(name=name, ok=False, detail="Slack 토큰을 읽지 못함: KeyError"))
+    try:
+        failed = (await client.get("/api/trackers/failed")).json()
+        assert f"{name}: Slack 토큰을 읽지 못함: KeyError" in failed
+    finally:
+        async with get_sessionmaker().begin() as session:
+            await session.execute(delete(TrackerRun).where(TrackerRun.name == name))

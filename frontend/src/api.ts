@@ -83,6 +83,7 @@ async function json<T>(response: Response): Promise<T> {
 
 export const getTasks = () => fetch("/api/tasks").then(json<Task[]>);
 export const getDrafts = () => fetch("/api/drafts").then(json<Draft[]>);
+export const getFailedTrackers = () => fetch("/api/trackers/failed").then(json<string[]>);
 export const getOverview = () => fetch("/api/ontology").then(json<Overview>);
 export const getConcept = (id: string) =>
   fetch(`/api/ontology/concepts/${id}`).then(json<ConceptDetail>);

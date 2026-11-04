@@ -3,7 +3,7 @@
 import logging
 import time
 import uuid
-from datetime import date, datetime
+from datetime import UTC, date, datetime
 from typing import Annotated
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
@@ -12,6 +12,7 @@ from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import Settings, get_settings
+from app.domain.tasks.briefing import failed_trackers
 from app.domain.tasks.service import (
     Evidence,
     TaskChanges,
@@ -231,6 +232,12 @@ async def send(draft_id: uuid.UUID, body: Outgoing) -> dict[str, str]:
     except (OSError, KeyError, ValueError) as exc:
         raise HTTPException(503, f"Slack 토큰을 읽지 못함: {type(exc).__name__}") from exc
     return {"sent": sent}
+
+
+@router.get("/trackers/failed")
+async def trackers_failed(session: SessionDep) -> list[str]:
+    """마지막 실행이 실패한 수집기와 사유. 보드가 위에 띄운다."""
+    return await failed_trackers(session, datetime.now(UTC))
 
 
 @router.get("/tasks")
