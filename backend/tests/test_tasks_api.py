@@ -216,3 +216,39 @@ async def test_failed_trackers_are_listed_for_the_board(client: AsyncClient) -> 
     finally:
         async with get_sessionmaker().begin() as session:
             await session.execute(delete(TrackerRun).where(TrackerRun.name == name))
+
+
+async def test_refresh_starts_the_tracker_unit_and_reports_state(
+    client: AsyncClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from app.api import tasks as tasks_api
+
+    calls: list[tuple[str, ...]] = []
+    state = {"active": "inactive"}
+
+    async def fake(*args: str) -> tuple[int, str]:
+        calls.append(args)
+        if args[0] == "start":
+            state["active"] = "activating"
+            return 0, ""
+        return 0, state["active"]
+
+    monkeypatch.setattr(tasks_api, "_systemctl", fake)
+    assert (await client.get("/api/trackers/state")).json()["running"] is False
+    assert (await client.post("/api/trackers/run")).json() == {"started": True}
+    assert ("start", "--no-block", "pao-tracker.service") in calls
+    assert (await client.get("/api/trackers/state")).json()["running"] is True
+
+
+async def test_refresh_says_why_the_tracker_did_not_start(
+    client: AsyncClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from app.api import tasks as tasks_api
+
+    async def fail(*args: str) -> tuple[int, str]:
+        return 1, "Unit pao-tracker.service not found."
+
+    monkeypatch.setattr(tasks_api, "_systemctl", fail)
+    response = await client.post("/api/trackers/run")
+    assert response.status_code == 503
+    assert "not found" in response.json()["detail"]

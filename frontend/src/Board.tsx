@@ -8,6 +8,8 @@ import {
   getFailedTrackers,
   getTasks,
   getThread,
+  getTrackerState,
+  runTrackers,
   sendDraft,
   type Draft,
   type Task,
@@ -27,6 +29,7 @@ const STATUS: Record<string, string> = {
 };
 const REFRESH_MS = 60_000;
 const REWRITE_POLL_MS = 5_000;
+const TRACKER_POLL_MS = 4_000;
 const NO_PROJECT = "프로젝트 없음";
 
 type TabId = "reply" | "suggested" | "in_progress" | "blocked" | "todo";
@@ -456,6 +459,9 @@ export function Board() {
   const [error, setError] = useState<string | null>(null);
   // 마지막 실행이 실패한 수집기. 초안이 안 생기는 이유가 여기 보인다.
   const [failed, setFailed] = useState<string[]>([]);
+  // 수집기가 도는 중인지와 마지막으로 끝난 때. 새로고침 버튼이 쓴다.
+  const [collecting, setCollecting] = useState(false);
+  const [lastRun, setLastRun] = useState<string | null>(null);
   const root = useRef<HTMLDivElement>(null);
   const search = useRef<HTMLInputElement>(null);
 
@@ -492,6 +498,49 @@ export function Board() {
     const timer = setInterval(() => void load(), REWRITE_POLL_MS);
     return () => clearInterval(timer);
   }, [rewriting, load]);
+
+  // 버튼을 누른 때. systemd가 실행을 올리기 전 잠깐은 멈춤으로 보여서, 그사이는 끝난 것으로 치지 않는다.
+  const pressedAt = useRef(0);
+  const checkTracker = useCallback(async () => {
+    const state = await getTrackerState().catch(() => null);
+    if (!state) return;
+    const finishedAfter =
+      state.last_run != null && new Date(state.last_run).getTime() > pressedAt.current;
+    const starting = Date.now() - pressedAt.current < 15_000 && !finishedAfter;
+    setCollecting(state.running || starting);
+    setLastRun(state.last_run);
+  }, []);
+
+  useEffect(() => {
+    void checkTracker();
+  }, [checkTracker]);
+
+  useEffect(() => {
+    // 수집기가 도는 동안 자주 보고, 새로 생긴 초안을 바로 띄운다. 끝나면 한 번 더 읽는다.
+    if (!collecting) return;
+    const timer = setInterval(() => {
+      void checkTracker();
+      void load();
+    }, TRACKER_POLL_MS);
+    return () => {
+      clearInterval(timer);
+      void load();
+    };
+  }, [collecting, checkTracker, load]);
+
+  const collect = async () => {
+    if (collecting) return;
+    pressedAt.current = Date.now();
+    setCollecting(true);
+    try {
+      await runTrackers();
+      setError(null);
+    } catch (cause) {
+      pressedAt.current = 0;
+      setCollecting(false);
+      setError(cause instanceof Error ? cause.message : "수집기를 켜지 못했어요");
+    }
+  };
 
   const act = useCallback(
     (action: () => Promise<unknown>) => {
@@ -627,13 +676,27 @@ export function Board() {
         >
           칸반
         </button>
+        <button
+          onClick={() => void collect()}
+          disabled={collecting}
+          title={
+            lastRun
+              ? `2325, Slack을 지금 읽고 답장 초안을 써요. 마지막 수집 ${clock(lastRun)}`
+              : "2325, Slack을 지금 읽고 답장 초안을 써요"
+          }
+          className="ml-auto flex items-center gap-1.5 rounded border border-line px-2 py-1 text-xs text-muted hover:border-accent hover:text-accent disabled:border-accent/50 disabled:text-accent"
+        >
+          <span className={collecting ? "inline-block animate-spin" : "inline-block"}>↻</span>
+          {collecting ? "가져오는 중" : "새로고침"}
+          {!collecting && lastRun && <span className="text-muted">{span(lastRun)} 전</span>}
+        </button>
         <input
           ref={search}
           value={query}
           onChange={(event) => setQuery(event.target.value)}
           placeholder="CS 번호, 브랜드, 내용 찾기 (/)"
           aria-label="찾기"
-          className="ml-auto w-64 rounded border border-line bg-panel px-2 py-1 text-sm outline-none focus:border-accent"
+          className="w-64 rounded border border-line bg-panel px-2 py-1 text-sm outline-none focus:border-accent"
         />
       </div>
       {error && <div className="px-4 pt-2 text-sm text-warn">{error}</div>}

@@ -84,6 +84,16 @@ async function json<T>(response: Response): Promise<T> {
 export const getTasks = () => fetch("/api/tasks").then(json<Task[]>);
 export const getDrafts = () => fetch("/api/drafts").then(json<Draft[]>);
 export const getFailedTrackers = () => fetch("/api/trackers/failed").then(json<string[]>);
+
+export type TrackerState = { running: boolean; last_run: string | null };
+export const getTrackerState = () => fetch("/api/trackers/state").then(json<TrackerState>);
+
+// 수집기(2325, Slack, 미리 쓰는 회신)를 바로 돌린다. 끝나기는 getTrackerState로 기다린다.
+export const runTrackers = async () => {
+  const response = await fetch("/api/trackers/run", { method: "POST" });
+  const body = (await response.json().catch(() => ({}))) as { detail?: string };
+  if (!response.ok) throw new Error(body.detail ?? `수집기를 켜지 못했어요 (${response.status})`);
+};
 export const getOverview = () => fetch("/api/ontology").then(json<Overview>);
 export const getConcept = (id: string) =>
   fetch(`/api/ontology/concepts/${id}`).then(json<ConceptDetail>);

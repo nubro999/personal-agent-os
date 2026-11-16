@@ -1,5 +1,6 @@
 """보드 화면용 Task API. 127.0.0.1에만 띄운다. 인증이 붙기 전까지 외부에 열지 않는다."""
 
+import asyncio
 import logging
 import time
 import uuid
@@ -25,7 +26,7 @@ from app.domain.tasks.service import (
 )
 from app.domain.tasks.values import TaskStatus
 from app.persistence.db import get_session
-from app.persistence.models import ReplyDraft, Task
+from app.persistence.models import ReplyDraft, Task, TrackerRun
 from app.trackers.slack import (
     SendError,
     rewrite_draft,
@@ -238,6 +239,56 @@ async def send(draft_id: uuid.UUID, body: Outgoing) -> dict[str, str]:
 async def trackers_failed(session: SessionDep) -> list[str]:
     """마지막 실행이 실패한 수집기와 사유. 보드가 위에 띄운다."""
     return await failed_trackers(session, datetime.now(UTC))
+
+
+# 수집기는 pao-tracker.timer가 30분마다 돌린다. 보드의 새로고침은 같은 유닛을 바로 한 번 더 켠다.
+# systemd가 이미 도는 실행에 붙여 주므로 두 번 겹쳐 돌지 않는다.
+TRACKER_UNIT = "pao-tracker.service"
+
+
+async def _systemctl(*args: str) -> tuple[int, str]:
+    process = await asyncio.create_subprocess_exec(
+        "systemctl",
+        "--user",
+        *args,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.STDOUT,
+    )
+    out, _ = await process.communicate()
+    return process.returncode or 0, out.decode(errors="replace").strip()
+
+
+async def start_trackers() -> None:
+    code, out = await _systemctl("start", "--no-block", TRACKER_UNIT)
+    if code != 0:
+        raise RuntimeError(out or f"systemctl exit {code}")
+
+
+async def trackers_running() -> bool:
+    code, out = await _systemctl("show", "-p", "ActiveState", "--value", TRACKER_UNIT)
+    return code == 0 and out in {"activating", "active", "reloading"}
+
+
+class TrackerState(BaseModel):
+    running: bool
+    last_run: datetime | None
+
+
+@router.get("/trackers/state")
+async def tracker_state(session: SessionDep) -> TrackerState:
+    """수집기가 지금 도는지와 마지막으로 끝난 때. 새로고침 버튼이 끝나기를 기다릴 때 본다."""
+    last = await session.scalar(select(func.max(TrackerRun.finished_at)))
+    return TrackerState(running=await trackers_running(), last_run=last)
+
+
+@router.post("/trackers/run")
+async def run_trackers() -> dict[str, bool]:
+    """수집기를 바로 돌린다. 2325, Slack을 읽고 초안을 쓸 뿐 Slack으로 보내지는 않는다."""
+    try:
+        await start_trackers()
+    except (OSError, RuntimeError) as exc:
+        raise HTTPException(503, f"수집기를 켜지 못함: {exc}"[:200]) from exc
+    return {"started": True}
 
 
 @router.get("/tasks")
