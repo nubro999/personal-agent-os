@@ -71,6 +71,9 @@ infra/systemd/install.sh   # 아래 서비스와 타이머 전부 등록
 - `pao-agent`: LangGraph 서버 (localhost:2024). 대화 기록은 `backend/.langgraph_api/`에 남는다.
 - `pao-api`: 앱 화면과 API (localhost:8000). 인증이 없어서 127.0.0.1에만 띄운다.
 - `pao-2325-tunnel`: 2325 DB 전용 터널 (127.0.0.1:13316). `run.sh`와 따로 돈다.
+- `pao-2325-relay`: 이 PC 의 AWS 키가 막혔을 때 터널 대신 켠다. 서버 맥의 DB 터널을 비밀번호와 TLS 로 빌려
+  127.0.0.1:13306, 13316 에 연다(`infra/tunnel/db_relay.py`). 짝을 지으면(`db_relay.py pair`) `install.sh`가
+  터널 대신 이것을 켠다. 서버 맥 쪽은 같은 파일을 옮겨 `set-password`, `install-launchd`를 한 번 한다.
 - `pao-tracker.timer`: 30분마다 2325, Slack, Claude Code, 정리. 결과는 `tracker_runs`에 남고 실패는 브리핑에 나온다.
 - `pao-briefing.timer`: 낮 12시 브리핑 (`~/.local/state/personal-agent-os/briefings/`, Windows 알림). 시각을 바꾸려면 유닛의 `OnCalendar`를 고친다.
 - `pao-backup.timer`: 새벽 3시 `pg_dump`를 `Documents/personal-agent-os-backups`로, 14일 보관.
