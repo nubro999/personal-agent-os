@@ -33,7 +33,15 @@ relations: {relations}
 {name}의 정의.
 """
 RELATIONS: dict[str, list[tuple[str, str, str, str]]] = {
-    "brand": [("customer", "belongs_to", "확정", "맵")],
+    "brand": [
+        ("customer", "belongs_to", "확정", "맵"),
+        ("source_record", "uses", "확정", "탭"),
+        ("function", "uses", "확정", "스펙"),
+    ],
+    "source_record": [
+        ("customer", "belongs_to", "확정", "공통"),
+        ("source_record", "belongs_to", "확정", "탭"),
+    ],
     "bot_config": [("brand", "configures", "확정", "표")],
     "conversation": [("brand", "belongs_to", "확정", "표")],
     "turn": [
@@ -56,6 +64,7 @@ RELATIONS: dict[str, list[tuple[str, str, str, str]]] = {
     ],
     "ment": [("bot_config", "belongs_to", "확정", "표")],
     "response_field": [("function", "belongs_to", "확정", "표")],
+    "function": [("source_record", "uses", "확정", "스펙")],
     "decision_point": [
         ("category", "belongs_to", "확정", "표"),
         ("step", "located_at", "추정", "표"),
@@ -124,6 +133,7 @@ NAMES = {
     "conversation": "대화",
     "turn": "턴",
     "tool_call": "함수 호출",
+    "source_record": "원천 기록",
 }
 
 
@@ -411,6 +421,177 @@ def rows_2325() -> dict[str, list[dict[str, object]]]:
         "events": [{"label": "개천절", "title": "개천절", "kind": "공휴일", "state": "active"}],
         "event_brands": [{"label": "개천절", "brand": "oa_v2", "company_id": 240}],
     }
+
+
+def test_customer_sheets_become_source_records_with_brand_tabs(
+    ontology: tuple[Path, Path],
+) -> None:
+    root, context = ontology
+    sheet = "https://docs.google.com/spreadsheets/d/SHEET1"
+    write_json(
+        context / "_오아주식회사" / "공통.json",
+        {
+            "runtime": {
+                "shared_systems": [
+                    {
+                        "name": "상품정보시트",
+                        "what": "상품 정보 정본. 고객사 소유",
+                        "brands": ["oa_v2"],
+                        "url": sheet,
+                        "tabs": {
+                            "oa_v2": {"tab": "오아", "gid": 7, "url": f"{sheet}/edit#gid=7"},
+                            "nope_v2": {"tab": "없음", "gid": 8},
+                        },
+                    },
+                    {"name": "주소 없는 시스템", "what": "카페24", "url": ""},
+                ],
+                "data_ownership": [{"how_to_fix": "고객사에 시트 수정 요청", "url": sheet}],
+            }
+        },
+    )
+    data, _ = build(root, context)
+
+    nodes = {n["id"]: n for n in data["nodes"]}
+    links = {(x["source"], x["name"], x["target"]) for x in data["links"]}
+    whole, tab = "source_record:sheet:SHEET1", "source_record:sheet:SHEET1:7"
+    assert (whole, "belongs_to", "customer:b_OA") in links
+    assert (tab, "belongs_to", whole) in links
+    assert ("brand:b_oakr", "uses", tab) in links
+    assert nodes[tab]["label"] == "상품정보시트 「오아」 탭"
+    assert nodes[tab]["real_key"] == f"{sheet}/edit#gid=7"
+    assert nodes[whole]["real_key"] == sheet
+    assert nodes[tab]["detail"].startswith("고치는 길: 고객사에 시트 수정 요청. 상품 정보 정본")
+    assert not any(n.startswith("source_record:") and "카페24" in nodes[n]["detail"] for n in nodes)
+    assert "source_record:sheet:SHEET1:8" not in nodes
+
+
+def test_product_sheets_link_functions_brands_and_owned_sheets(
+    ontology: tuple[Path, Path],
+) -> None:
+    root, context = ontology
+    policy_path = context / "_오아주식회사" / "oa_v2" / "정책.json"
+    policy = json.loads(policy_path.read_text(encoding="utf-8"))
+    feedback = "https://docs.google.com/spreadsheets/d/FEEDBACK1"
+    policy["runtime"] = {
+        "data_ownership": [
+            {"data": "피드백 시트", "owner": "고객사", "we_can_fix": False,
+             "how_to_fix": "고객사에 요청", "url": f"{feedback}/edit"},
+            {"data": "카페24 주문", "owner": "고객사", "url": ""},
+        ]
+    }  # fmt: skip
+    write_json(policy_path, policy)
+    url = "https://docs.google.com/spreadsheets/d/PRODUCT1"
+    write_json(
+        root / "source/sheets/product_sheets.json",
+        {
+            "entries": [
+                {
+                    "db_name": "oa_v2",
+                    "tools_folder": "oa",
+                    "functions": ["search_products"],
+                    "sheet": {"id": "PRODUCT1", "title": "오아 상품시트", "url": url},
+                    "tabs": [{"tab": "상품", "gid": 5, "url": f"{url}/edit#gid=5"}],
+                    "evidence": "genlab-tools brands/oa/specs/search_products/external-apis.md",
+                },
+                {
+                    "db_name": "nobody",
+                    "functions": ["search_products"],
+                    "sheet": {"id": "PRODUCT2", "title": "모르는 시트", "url": "u"},
+                    "tabs": [],
+                },
+            ]
+        },
+    )
+    data, _ = build(root, context)
+
+    nodes = {n["id"]: n for n in data["nodes"]}
+    links = {(x["source"], x["name"], x["target"]) for x in data["links"]}
+    tab, whole = "source_record:sheet:PRODUCT1:5", "source_record:sheet:PRODUCT1"
+    function = "function:oa_v2:search_products"
+    assert (function, "uses", tab) in links
+    assert ("brand:b_oakr", "uses", tab) in links
+    assert ("brand:b_oakr", "uses", function) in links
+    assert (tab, "belongs_to", whole) in links
+    assert (whole, "belongs_to", "customer:b_OA") in links
+    assert nodes[tab]["real_key"] == f"{url}/edit#gid=5"
+    assert nodes[tab]["label"] == "오아 상품시트 「상품」 탭"
+    # 브랜드를 못 찾아도 함수와 시트는 잇는다
+    assert ("function:nobody:search_products", "uses", "source_record:sheet:PRODUCT2") in links
+    owned = "source_record:sheet:FEEDBACK1"
+    assert (owned, "belongs_to", "customer:b_OA") in links
+    assert nodes[owned]["detail"] == (
+        "피드백 시트. 주인 고객사, 우리가 못 고침, 고치는 길: 고객사에 요청"
+    )
+    assert not any(s == "brand:b_oakr" and t == owned for s, _, t in links)
+
+
+def test_brand_sheets_link_brands_to_sheets_and_their_tabs(
+    ontology: tuple[Path, Path],
+) -> None:
+    root, context = ontology
+    url = "https://docs.google.com/spreadsheets/d/SHARED1"
+    write_json(
+        root / "source/sheets/brand_sheets.json",
+        {
+            "aliases": {"oaa": "오아"},
+            "entries": [
+                {
+                    "name": "회수 기록",
+                    "brands": ["oa", "nobody"],
+                    "kind": "sheet",
+                    "note": "탭별",
+                    "readable": True,
+                    "sheet": {"id": "SHARED1", "title": "AI반품", "url": url},
+                    "tabs": [
+                        {
+                            "tab": "반품 접수",
+                            "gid": 0,
+                            "brands": ["oa"],
+                            "url": f"{url}/edit#gid=0",
+                        },
+                        {"tab": "TM", "gid": 9, "brands": ["nobody"], "url": f"{url}/edit#gid=9"},
+                        {"tab": "없는 탭", "gid": None, "brands": ["oa"], "url": url},
+                    ],
+                },
+                {
+                    "name": "닫힌 시트",
+                    "brands": ["oaa"],
+                    "kind": "sheet",
+                    "note": "",
+                    "readable": False,
+                    "sheet": {"id": "CLOSED1", "title": "닫힌 시트", "url": "u2"},
+                    "tabs": [],
+                },
+                {
+                    "name": "사진 폴더",
+                    "brands": ["oa"],
+                    "kind": "drive",
+                    "url": "https://drive.google.com/drive/folders/FOLDER1",
+                    "note": "",
+                },
+            ],
+        },
+    )
+    data, gaps = build(root, context)
+
+    nodes = {n["id"]: n for n in data["nodes"]}
+    links = {(x["source"], x["name"], x["target"]) for x in data["links"]}
+    whole, mine, other = (
+        "source_record:sheet:SHARED1",
+        "source_record:sheet:SHARED1:0",
+        "source_record:sheet:SHARED1:9",
+    )
+    assert ("brand:b_oakr", "uses", mine) in links
+    assert ("brand:b_oakr", "uses", other) not in links
+    assert (mine, "belongs_to", whole) in links
+    assert (whole, "belongs_to", "customer:b_OA") in links
+    assert nodes[mine]["label"] == "AI반품 「반품 접수」 탭"
+    assert ("brand:b_oakr", "uses", "source_record:sheet:CLOSED1") in links
+    assert "봇 계정에 공유 안 됨" in nodes["source_record:sheet:CLOSED1"]["detail"]
+    folder = "source_record:drive:FOLDER1"
+    assert ("brand:b_oakr", "uses", folder) in links
+    assert nodes[folder]["real_key"] == "https://drive.google.com/drive/folders/FOLDER1"
+    assert "brand_sheets nobody" in gaps
 
 
 def test_link_outside_concept_relations_stops_the_build(ontology: tuple[Path, Path]) -> None:
