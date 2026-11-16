@@ -1,14 +1,27 @@
+from pathlib import Path
 from typing import Any
 
 from app.ontology.trial import (
     STEP_HIDDEN,
     OntologyView,
+    Outcome,
     Target,
+    TrialCase,
+    Verdict,
+    agent_section,
     change_targets,
     hidden_for,
+    judge_prompt,
+    load_set,
+    name_groups,
+    real_runs,
     score_targets,
     settle_hidden,
     similarity,
+    summary,
+    verdict_block,
+    verdict_counts,
+    with_verdict,
 )
 
 
@@ -133,3 +146,84 @@ def test_steps_score_by_category_and_new_items_by_name() -> None:
 def test_similarity_ignores_brackets_and_punctuation() -> None:
     assert similarity("[반송수령일자 해석]", "반송수령일자해석") == 1.0
     assert similarity("[반송수령일자 해석]", "[카카오 라이브]") == 0.0
+
+
+def test_similar_new_names_count_as_one() -> None:
+    created = {
+        "info:m:[라이브 시청 방법·구매 혜택]": "[라이브 시청 방법·구매 혜택]",
+        "info:m:[라이브 시청 방법·혜택 안내]": "[라이브 시청 방법·혜택 안내]",
+        "info:m:[반송수령일자 해석]": "[반송수령일자 해석]",
+    }
+    assert sorted(len(g) for g in name_groups(created)) == [1, 2]
+
+    score, _ = score_targets(
+        [target("만들기", "category:m:할인", "info", "[라이브 시청 방법과 혜택]")],
+        set(),
+        created,
+        {},
+    )
+    assert (score["created"], score["create_hit"], score["recall_id"]) == (2, 1, 0.5)
+
+
+def test_set_file_and_summary(tmp_path: Path) -> None:
+    path = tmp_path / "set.yaml"
+    path.write_text("- case: case:Xcs_1\n  kind: 분류 오류\n- case: case:Xcs_2\n")
+    trials = load_set(path)
+    assert trials == [TrialCase("case:Xcs_1", "분류 오류"), TrialCase("case:Xcs_2")]
+
+    score = {
+        "existing": 2,
+        "created": 1,
+        "proposed": 3,
+        "id_hit": 1,
+        "unit_hit": 2,
+        "create_hit": 1,
+    }
+    outcomes = [
+        Outcome(trials[0], "CS-1", score, 20, "success", "맞음"),
+        Outcome(trials[1], "CS-2", score, 30, "success"),
+    ]
+    text = summary("9차", outcomes)
+    assert "| CS-1 | 분류 오류 | 맞음 | 2 / 3 | 3 / 3 | 1 / 1 | 3 | 20 | success |" in text
+    assert "| CS-2 |  | - | 2 / 3 |" in text
+    assert "| 분류 오류 | 맞음 1 | 2 / 3 | 3 / 3 |" in text
+    assert text.rstrip().endswith("| 전체 | 맞음 1, 판정 없음 1 | 4 / 6 | 6 / 6 |")
+
+
+def test_verdict_counts_keep_fixed_order() -> None:
+    assert verdict_counts(["일부", "맞음", "맞음", ""]) == "맞음 2, 일부 1, 판정 없음 1"
+    assert verdict_counts([]) == "-"
+
+
+def test_judge_sees_the_hidden_diagnosis_and_agent_result_but_not_the_truth_section() -> None:
+    data = graph()
+    data["nodes"].append({"id": "review:a:diagnosis", "label": "diagnosis O", "concept": "review"})
+    hidden, _ = hidden_for(data, "case:A")
+    assert real_runs(data, hidden) == {"a": "diagnosis O"}
+
+    report_text = (
+        "# 온톨로지 검증 CS-1\n\n- 건: `case:A`\n\n"
+        "## 에이전트 결과\n\n**진단:** 설명이 가로챔\n\n"
+        "## 실제로 한 일 (숨겼던 정답)\n\n- `category:x` (맞힘)\n"
+    )
+    agent = agent_section(report_text)
+    assert agent == "**진단:** 설명이 가로챔"
+    prompt = judge_prompt("요청 원문", [("a", "diagnosis O", "결론: 설명이 가로챘다")], agent)
+    assert "## 실제 진단 a (판정: diagnosis O)" in prompt
+    assert "설명이 가로챔" in prompt and "맞힘" not in prompt
+
+
+def test_verdict_goes_before_agent_result_and_replaces_old_one() -> None:
+    report_text = "# 검증\n\n- 건: `case:A`\n\n## 에이전트 결과\n\n진단\n"
+    first = with_verdict(
+        report_text, verdict_block(Verdict(verdict="일부", reason="추정", missed=""), ["a"])
+    )
+    assert first.index("## 진단 판정") < first.index("## 에이전트 결과")
+    assert "**일부**" in first and "놓친 것" not in first
+
+    second = with_verdict(
+        first, verdict_block(Verdict(verdict="맞음", reason="같다", missed="턴"), ["a"])
+    )
+    assert second.count("## 진단 판정") == 1
+    assert "**맞음**" in second and "**일부**" not in second and "놓친 것: 턴" in second
+    assert second.endswith("## 에이전트 결과\n\n진단\n")

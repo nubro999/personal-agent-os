@@ -10,19 +10,29 @@ config_tree는 지금 운영 설정이라 그 건을 고친 뒤의 내용이다.
 턴 원문, 서빙 프롬프트, 함수 로그는 회사 도구로 그때 읽는다. 문제 턴보다 뒤의 턴은 고친 뒤
 매뉴얼로 답했을 수 있어 읽지 못하게 한다.
 
+진단은 채점 모델이 숨긴 실제 진단(2325 rnd_output 진단 본문)과 대조해 맞음, 대체로 맞음, 일부,
+틀림으로 매긴다.
+
 실행: uv run python -m app.ontology.trial case:Xcs_... [case:Xcs_...]
-결과: <PAO_ONTOLOGY_DIR>/검증/<날짜>_<건>.md
+      uv run python -m app.ontology.trial --set 시험건.yaml --round 9차_시험건 [--parallel 3]
+      uv run python -m app.ontology.trial --judge 9차_시험건 [--set 시험건.yaml]
+결과: <PAO_ONTOLOGY_DIR>/검증/[<회차>/]<날짜>_<건>.md, 회차를 주면 <회차>/점수.md
+--judge는 에이전트를 다시 돌리지 않고 지난 결과 파일만 다시 판정한다.
 """
 
+import argparse
 import asyncio
 import json
 import logging
-import sys
+import re
 from collections import defaultdict
+from dataclasses import dataclass
 from datetime import date
+from pathlib import Path
 from typing import Any, Literal
 
 import pymysql
+import yaml
 from claude_agent_sdk import (
     AssistantMessage,
     ClaudeAgentOptions,
@@ -38,7 +48,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from app.config import get_settings
 from app.ontology import live
 from app.ontology.concepts import load_concepts, load_verbs
-from app.ontology.prompts import TRIAL_SYSTEM
+from app.ontology.prompts import JUDGE_SYSTEM, TRIAL_SYSTEM
 from app.trackers.maintenance import connect
 
 log = logging.getLogger(__name__)
@@ -53,6 +63,15 @@ STEP_HIDDEN = "(이 카테고리는 고쳐졌다. step 본문은 카테고리의
 NOT_EXISTED = "없다."
 # 새로 만든 것은 id가 없어 이름으로 맞춘다. 글자 두 개씩 겹치는 비율(Dice)이 이 이상이면 같은 것
 SAME_NAME = 0.4
+# 채점 모델에 넘기는 실제 진단 본문의 길이. 앞쪽 요약과 문제 턴이 핵심이다.
+JUDGE_LIMIT = 8000
+JUDGE_TURNS = 3
+REQUEST_LIMIT = 4000
+VERDICTS = ("맞음", "대체로 맞음", "일부", "틀림")
+VERDICT_HEAD = "## 진단 판정"
+AGENT_HEAD = "## 에이전트 결과"
+TRUTH_HEAD = "## 실제로 한 일"
+CASE_LINE = re.compile(r"^- 건: `(case:[^`]+)`", re.MULTILINE)
 # 숨길 정답: 건을 처리한 기록
 _WORK = {"run", "diagnosis", "proposal", "test_round", "knowledge_note", "change_item", "review"}
 
@@ -81,6 +100,14 @@ class TrialResult(BaseModel):
     evidence_path: list[str] = Field(description="판단에 쓴 사례 id를 순서대로")
     missing: list[str] = Field(description="처리하는 데 필요했지만 온톨로지에 없던 정보")
     confidence: str = Field(description="높음, 중간, 낮음 중 하나와 이유")
+
+
+class Verdict(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    verdict: Literal["맞음", "대체로 맞음", "일부", "틀림"]
+    reason: str = Field(description="판정 이유 한두 문장. 무엇이 같고 무엇이 다른지")
+    missed: str = Field(description="실제 진단에 있는데 에이전트가 놓친 것. 없으면 빈 문자열")
 
 
 class OntologyView:
@@ -470,6 +497,27 @@ def similarity(a: str, b: str) -> float:
     return 2 * len(left & right) / (len(left) + len(right)) if left and right else 0.0
 
 
+def name_groups(created: dict[str, str]) -> list[set[str]]:
+    """새로 만든 것 중 같은 개념에 이름이 비슷한 것은 하나로 본다.
+
+    에이전트 여럿이 같은 정보를 각자 만들어 정답에 비슷한 이름이 여럿 남는다(CS-0004242).
+    하나씩 세면 만들기 하나로 여러 개를 맞힌 것처럼 점수가 부푼다.
+    """
+    groups: list[set[str]] = []
+    for node_id, label in sorted(created.items()):
+        concept = node_id.split(":", 1)[0]
+        for group in groups:
+            if any(
+                other.split(":", 1)[0] == concept and similarity(label, created[other]) >= SAME_NAME
+                for other in group
+            ):
+                group.add(node_id)
+                break
+        else:
+            groups.append({node_id})
+    return groups
+
+
 def score_targets(
     targets: list[Target],
     existing: set[str],
@@ -480,6 +528,7 @@ def score_targets(
 
     existing: 실제로 바꾼, 고치기 전에도 있던 대상. id와 카테고리 단위로 맞춘다.
     created: 실제로 새로 만든 대상 id -> 이름. 같은 개념의 만들기 제안과 이름으로 맞춘다.
+    비슷한 이름끼리는 한 묶음으로 세고, 묶음 안 하나라도 맞히면 그 묶음을 맞힌 것이다.
     """
     by_id = {t.id for t in targets if t.action != "만들기"}
     # 만들기도 그것을 쓸 곳은 고치는 것이라 단위에 넣는다
@@ -503,17 +552,19 @@ def score_targets(
             marks.append("")
     id_hit = existing & by_id
     unit_hit = {e for e in existing if unit_of(e, categories) in units}
-    total = len(existing) + len(created)
+    groups = name_groups(created)
+    group_hit = [g for g in groups if g & made.keys()]
+    total = len(existing) + len(groups)
     score = {
         "existing": len(existing),
-        "created": len(created),
+        "created": len(groups),
         "proposed": len(targets),
         "proposed_create": sum(t.action == "만들기" for t in targets),
         "id_hit": len(id_hit),
         "unit_hit": len(unit_hit),
-        "create_hit": len(made),
-        "recall_id": round((len(id_hit) + len(made)) / total, 2) if total else None,
-        "recall_unit": round((len(unit_hit) + len(made)) / total, 2) if total else None,
+        "create_hit": len(group_hit),
+        "recall_id": round((len(id_hit) + len(group_hit)) / total, 2) if total else None,
+        "recall_unit": round((len(unit_hit) + len(group_hit)) / total, 2) if total else None,
     }
     return score, marks
 
@@ -616,6 +667,119 @@ def report(
     return "\n".join(lines) + "\n", score
 
 
+def real_runs(data: dict[str, Any], hidden: set[str]) -> dict[str, str]:
+    """숨긴 진단의 실행 id -> 사람 판정(diagnosis O 같은 것, 없으면 빈 문자열)."""
+    labels = {n["id"]: n["label"] for n in data["nodes"]}
+    return {
+        node_id.split(":", 1)[1]: labels.get(f"review:{node_id.split(':', 1)[1]}:diagnosis", "")
+        for node_id in hidden
+        if labels.get(node_id) is not None and node_id.startswith("diagnosis:")
+    }
+
+
+def diagnosis_bodies(run_ids: list[str]) -> list[tuple[str, str]]:
+    """(실행 id, 진단 본문)을 실행 시각 순으로. 빌드에는 240자만 있어 2325에서 다시 읽는다."""
+    if not run_ids:
+        return []
+    settings = get_settings()
+    conn = connect(dotenv_values(settings.maint_env_file), settings.maint_db_port)
+    try:
+        with conn.cursor(pymysql.cursors.DictCursor) as cur:
+            cur.execute("SET SESSION TRANSACTION READ ONLY")
+            marks = ",".join(["%s"] * len(run_ids))
+            cur.execute(
+                f"""SELECT o.run_id, LEFT(o.body, {JUDGE_LIMIT}) AS body
+                    FROM rnd_output o JOIN rnd_run r ON r.run_id = o.run_id
+                    WHERE o.part = 'diagnosis' AND o.run_id IN ({marks})
+                    ORDER BY r.ran_at, o.run_id""",
+                run_ids,
+            )
+            rows = list(cur.fetchall())
+    finally:
+        conn.close()
+    return [(row["run_id"], row["body"] or "") for row in rows]
+
+
+def agent_section(report_text: str) -> str:
+    """결과 파일에서 에이전트 결과 절만. 채점 모델이 숨긴 정답 절을 보지 않게 한다."""
+    start = report_text.find(AGENT_HEAD)
+    end = report_text.find(TRUTH_HEAD)
+    if start < 0:
+        return ""
+    return report_text[start + len(AGENT_HEAD) : end if end > start else None].strip()
+
+
+def judge_prompt(request: str, truths: list[tuple[str, str, str]], agent_text: str) -> str:
+    """truths: (실행 id, 사람 판정, 진단 본문)."""
+    parts = ["## 건 원문", "", request[:REQUEST_LIMIT], ""]
+    for run_id, review, body in truths:
+        parts += [f"## 실제 진단 {run_id} (판정: {review or '없음'})", "", body, ""]
+    parts += ["## 시험 에이전트 결과", "", agent_text, ""]
+    parts.append("시험 에이전트의 진단을 실제 진단과 대조해 판정을 형식에 맞춰 내.")
+    return "\n".join(parts)
+
+
+async def judge(
+    request: str, truths: list[tuple[str, str, str]], agent_text: str
+) -> Verdict | None:
+    if not truths or not agent_text:
+        return None
+    options = ClaudeAgentOptions(
+        model=MODEL,
+        system_prompt=JUDGE_SYSTEM,
+        tools=[],
+        setting_sources=[],
+        max_turns=JUDGE_TURNS,
+        output_format={"type": "json_schema", "schema": Verdict.model_json_schema()},
+        extra_args={"no-session-persistence": None},
+    )
+    result: ResultMessage | None = None
+    async for message in query(prompt=judge_prompt(request, truths, agent_text), options=options):
+        if isinstance(message, ResultMessage):
+            result = message
+    if not result or not result.structured_output:
+        return None
+    return Verdict.model_validate(result.structured_output)
+
+
+async def judge_case(
+    data: dict[str, Any], case_id: str, report_text: str
+) -> tuple[Verdict | None, list[str]]:
+    """(판정, 기준으로 쓴 실행 id). 숨긴 진단이 없으면 판정하지 않는다."""
+    hidden, _ = hidden_for(data, case_id)
+    reviews = real_runs(data, hidden)
+    bodies = await asyncio.to_thread(diagnosis_bodies, sorted(reviews))
+    truths = [(run_id, reviews[run_id], body) for run_id, body in bodies]
+    case = next(n for n in data["nodes"] if n["id"] == case_id)
+    verdict = await judge(case.get("detail") or "", truths, agent_section(report_text))
+    return verdict, [run_id for run_id, _, _ in truths]
+
+
+def verdict_block(verdict: Verdict | None, runs: list[str]) -> str:
+    if verdict is None:
+        return f"{VERDICT_HEAD}\n\n판정하지 못했다(숨긴 진단이나 에이전트 결과가 없다).\n\n"
+    lines = [
+        VERDICT_HEAD,
+        "",
+        f"**{verdict.verdict}** ({MODEL}, 기준 " + ", ".join(f"`{r}`" for r in runs) + ")",
+        "",
+        verdict.reason,
+    ]
+    if verdict.missed:
+        lines += ["", f"놓친 것: {verdict.missed}"]
+    return "\n".join(lines) + "\n\n"
+
+
+def with_verdict(report_text: str, block: str) -> str:
+    """에이전트 결과 절 앞에 판정 절을 넣는다. 이미 있으면 바꾼다."""
+    start = report_text.find(VERDICT_HEAD)
+    if start >= 0:
+        end = report_text.find("\n## ", start + len(VERDICT_HEAD))
+        report_text = report_text[:start] + report_text[end + 1 :]
+    at = report_text.find(AGENT_HEAD)
+    return report_text + "\n" + block if at < 0 else report_text[:at] + block + report_text[at:]
+
+
 def load_ontology() -> tuple[dict[str, Any], dict[str, dict[str, Any]], dict[str, str]]:
     """(사례 그래프, 개념, 동사 뜻). 에이전트에게 보여 줄 온톨로지 재료."""
     root = get_settings().ontology_dir
@@ -645,37 +809,210 @@ def hide_case_work(data: dict[str, Any], case_id: str) -> tuple[set[str], dict[s
     return settle_hidden(hidden, before, created), before
 
 
-async def main_async(case_ids: list[str]) -> None:
+@dataclass(frozen=True)
+class TrialCase:
+    case: str  # case:Xcs_...
+    kind: str = ""  # 업무 성격: 분류 오류, 내용 오류, 함수 해석 오류, step 흐름 오류, 멘트 오류
+    note: str = ""
+
+
+@dataclass
+class Outcome:
+    trial: TrialCase
+    name: str
+    score: dict[str, Any]
+    calls: int
+    status: str
+    verdict: str = ""
+
+
+def load_set(path: Path) -> list[TrialCase]:
+    """시험 건 목록. 항목마다 case, kind, note."""
+    rows = yaml.safe_load(path.read_text(encoding="utf-8")) or []
+    return [TrialCase(r["case"], r.get("kind", ""), r.get("note", "")) for r in rows]
+
+
+def _ratio(hit: int, total: int) -> str:
+    return f"{hit} / {total}" if total else "-"
+
+
+def verdict_counts(verdicts: list[str]) -> str:
+    """맞음 2, 일부 1 처럼. 판정 못 한 것은 판정 없음으로 센다."""
+    counts = {v: verdicts.count(v) for v in (*VERDICTS, "") if verdicts.count(v)}
+    return ", ".join(f"{v or '판정 없음'} {n}" for v, n in counts.items()) or "-"
+
+
+def summary(round_name: str, outcomes: list[Outcome]) -> str:
+    """회차 점수표. 건마다 한 줄, 업무 성격마다 합계."""
+    lines = [
+        f"# {round_name} 점수",
+        "",
+        "진단은 채점 모델이 숨긴 실제 진단과 대조해 매긴다. 이유는 결과 파일의 진단 판정 절에 있다.",  # noqa: E501
+        "id 기준은 바꾼 대상의 id와 새로 만든 묶음, 카테고리 기준은 step을 카테고리로 묶어 센다.",
+        "",
+        "| 건 | 성격 | 진단 | id 기준 | 카테고리 기준 | 새로 만든 것 | 제안 | 도구 호출 | 실행 |",
+        "|---|---|---|---|---|---|---|---|---|",
+    ]
+    totals: dict[str, list[int]] = defaultdict(lambda: [0, 0, 0])
+    verdicts: dict[str, list[str]] = defaultdict(list)
+    for o in outcomes:
+        s = o.score
+        total = s["existing"] + s["created"]
+        id_hit = s["id_hit"] + s["create_hit"]
+        unit_hit = s["unit_hit"] + s["create_hit"]
+        lines.append(
+            f"| {o.name} | {o.trial.kind} | {o.verdict or '-'} | {_ratio(id_hit, total)} "
+            f"| {_ratio(unit_hit, total)} "
+            f"| {_ratio(s['create_hit'], s['created'])} | {s['proposed']} | {o.calls} "
+            f"| {o.status} |"
+        )
+        for key in (o.trial.kind or "-", "전체"):
+            totals[key][0] += id_hit
+            totals[key][1] += unit_hit
+            totals[key][2] += total
+            verdicts[key].append(o.verdict)
+    lines += ["", "| 성격 | 진단 | id 기준 | 카테고리 기준 |", "|---|---|---|---|"]
+    # 성격별을 먼저, 전체를 맨 끝에 둔다
+    order = sorted(totals, key=lambda k: k == "전체")
+    for key in order:
+        id_hit, unit_hit, total = totals[key]
+        lines.append(
+            f"| {key} | {verdict_counts(verdicts[key])} | {_ratio(id_hit, total)} "
+            f"| {_ratio(unit_hit, total)} |"
+        )
+    return "\n".join(lines) + "\n"
+
+
+async def run_case(
+    trial: TrialCase,
+    data: dict[str, Any],
+    concepts: dict[str, dict[str, Any]],
+    definitions: dict[str, str],
+    categories: dict[str, str],
+    out_dir: Path,
+) -> Outcome:
+    data_nodes = {n["id"]: n for n in data["nodes"]}
+    case_id = trial.case
+    _, changed = hidden_for(data, case_id)
+    hidden, before = await asyncio.to_thread(hide_case_work, data, case_id)
+    view = OntologyView(data, concepts, definitions, hidden, before)
+    log.info(
+        "trial %s: hidden %d, before %d, changed %d",
+        case_id,
+        len(hidden),
+        len(before),
+        len(changed),
+    )
+    result, calls, status = await run_trial(view, case_id, turn_cutoff(data, case_id))
+    text, score = report(
+        data_nodes[case_id], data_nodes, hidden, changed, categories, result, calls, status
+    )
+    verdict, runs = await judge_case(data, case_id, text)
+    text = with_verdict(text, verdict_block(verdict, runs))
+    name = data_nodes[case_id]["label"].split()[0]
+    path = out_dir / f"{date.today().isoformat()}_{name}.md"
+    path.write_text(text, encoding="utf-8")
+    log.info("trial %s: %s calls=%d score=%s -> %s", case_id, status, len(calls), score, path)
+    return Outcome(trial, name, score, len(calls), status, verdict.verdict if verdict else "")
+
+
+async def main_async(trials: list[TrialCase], round_name: str = "", parallel: int = 1) -> None:
     root = get_settings().ontology_dir
     data, concepts, definitions = load_ontology()
-    data_nodes = {n["id"]: n for n in data["nodes"]}
     categories = step_categories(data)
-    out_dir = root / "검증"
-    out_dir.mkdir(exist_ok=True)
-    for case_id in case_ids:
-        _, changed = hidden_for(data, case_id)
-        hidden, before = hide_case_work(data, case_id)
-        view = OntologyView(data, concepts, definitions, hidden, before)
-        log.info(
-            "trial %s: hidden %d, before %d, changed %d",
-            case_id,
-            len(hidden),
-            len(before),
-            len(changed),
-        )
-        result, calls, status = await run_trial(view, case_id, turn_cutoff(data, case_id))
-        text, score = report(
-            data_nodes[case_id], data_nodes, hidden, changed, categories, result, calls, status
-        )
-        name = data_nodes[case_id]["label"].split()[0]
-        path = out_dir / f"{date.today().isoformat()}_{name}.md"
-        path.write_text(text, encoding="utf-8")
-        log.info("trial %s: %s calls=%d score=%s -> %s", case_id, status, len(calls), score, path)
+    out_dir = root / "검증" / round_name if round_name else root / "검증"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    gate = asyncio.Semaphore(parallel)
+
+    async def one(trial: TrialCase) -> Outcome | None:
+        async with gate:
+            try:
+                return await run_case(trial, data, concepts, definitions, categories, out_dir)
+            except Exception as exc:  # 한 건이 실패해도 나머지 건은 돈다
+                log.warning("trial %s failed: %s", trial.case, exc)
+                return None
+
+    outcomes = [o for o in await asyncio.gather(*map(one, trials)) if o]
+    if round_name:
+        (out_dir / "점수.md").write_text(summary(round_name, outcomes), encoding="utf-8")
+
+
+async def judge_round(round_name: str, kinds: dict[str, str], parallel: int = 3) -> None:
+    """지난 회차의 결과 파일을 다시 판정한다. 에이전트는 다시 돌리지 않는다.
+
+    판정 절을 결과 파일에 넣고, 점수.md의 진단 자동 판정 절을 바꾼다.
+    """
+    out_dir = get_settings().ontology_dir / "검증" / round_name
+    data, _, _ = load_ontology()
+    gate = asyncio.Semaphore(parallel)
+
+    async def one(name: str, text: str) -> tuple[str, str, str, Verdict | None] | None:
+        found = CASE_LINE.search(text)
+        if not found:
+            return None
+        async with gate:
+            try:
+                verdict, runs = await judge_case(data, found.group(1), text)
+            except Exception as exc:  # 한 건이 실패해도 나머지 건은 돈다
+                log.warning("judge %s failed: %s", name, exc)
+                return None
+        log.info("judge %s: %s", name, verdict.verdict if verdict else "-")
+        block = verdict_block(verdict, runs)
+        return name, kinds.get(found.group(1), ""), with_verdict(text, block), verdict
+
+    paths = sorted(p for p in out_dir.glob("*.md") if p.name != "점수.md")
+    texts = {p: p.read_text(encoding="utf-8") for p in paths}
+    judged = await asyncio.gather(*(one(p.stem.split("_", 1)[-1], texts[p]) for p in paths))
+    rows = []
+    for path, row in zip(paths, judged, strict=True):
+        if row:
+            path.write_text(row[2], encoding="utf-8")
+            rows.append((row[0], row[1], row[3]))
+    lines = [
+        "## 진단 자동 판정",
+        "",
+        f"채점 모델({MODEL})이 숨긴 실제 진단과 대조했다. {date.today().isoformat()}",
+        "",
+        "| 건 | 성격 | 진단 | 이유 |",
+        "|---|---|---|---|",
+        *(
+            f"| {name} | {kind} | {v.verdict if v else '-'} | "
+            + (v.reason.replace("|", "/").replace("\n", " ") if v else "")
+            + " |"
+            for name, kind, v in rows
+        ),
+        "",
+        verdict_counts([v.verdict if v else "" for _, _, v in rows]) + ".",
+    ]
+    score_path = out_dir / "점수.md"
+    old = score_path.read_text(encoding="utf-8") if score_path.exists() else ""
+    cut = old.find("\n## 진단 자동 판정")
+    kept = old if cut < 0 else old[:cut]
+    score_path.write_text(kept.rstrip("\n") + "\n\n" + "\n".join(lines) + "\n", encoding="utf-8")
 
 
 def main() -> None:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
-    asyncio.run(main_async(sys.argv[1:]))
+    parser = argparse.ArgumentParser(description="온톨로지 검증")
+    parser.add_argument("cases", nargs="*", help="case:Xcs_...")
+    parser.add_argument("--set", type=Path, help="시험 건 목록(yaml). 상대 경로는 검증/ 기준")
+    parser.add_argument("--round", default="", help="회차 폴더 이름. 주면 점수표도 쓴다")
+    parser.add_argument("--parallel", type=int, default=1, help="동시에 돌릴 건 수")
+    parser.add_argument("--judge", default="", help="이 회차의 결과 파일만 다시 판정한다")
+    args = parser.parse_args()
+    trials = [TrialCase(c) for c in args.cases]
+    if args.set:
+        path = (
+            args.set if args.set.is_absolute() else get_settings().ontology_dir / "검증" / args.set
+        )
+        trials += load_set(path)
+    if args.judge:
+        kinds = {t.case: t.kind for t in trials}
+        asyncio.run(judge_round(args.judge, kinds, max(args.parallel, 3)))
+        return
+    if not trials:
+        parser.error("건이나 --set이 있어야 한다")
+    asyncio.run(main_async(trials, args.round, args.parallel))
 
 
 if __name__ == "__main__":
