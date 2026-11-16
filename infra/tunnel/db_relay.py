@@ -248,6 +248,28 @@ async def serve(args: argparse.Namespace) -> None:
     min_tls(context)
     context.load_cert_chain(str(cert), str(key))
     guard = Guard()
+    loop = asyncio.get_running_loop()
+    # PBKDF2 는 한 번에 0.1~0.3초 든다. 루프 안에서 돌리면 그동안 열린 DB 연결까지 모두 멈추므로
+    # 스레드로 뺀다. 한 번 맞은 비밀번호는 빠른 해시로 기억해 두고 다음 연결부터는 그것과 대조한다
+    # (틀린 비밀번호는 언제나 PBKDF2 를 거치고 Guard 가 센다).
+    remembered: list[bytes] = []
+
+    def quick(given: bytes) -> bytes:
+        return hashlib.sha256(salt + given).digest()
+
+    def slow_check(given: bytes) -> bool:
+        return hmac.compare_digest(hash_password(given.decode("utf-8", "replace"), salt), expected)
+
+    async def verify(given: bytes) -> bool:
+        if not given:
+            return False
+        fast = quick(given)
+        if remembered and hmac.compare_digest(fast, remembered[0]):
+            return True
+        if await loop.run_in_executor(None, slow_check, given):
+            remembered[:] = [fast]
+            return True
+        return False
 
     async def handle(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
         peer = writer.get_extra_info("peername") or ("?", 0)
@@ -265,9 +287,7 @@ async def serve(args: argparse.Namespace) -> None:
             writer.close()
             return
         given = line[len(MAGIC) :].rstrip(b"\n")
-        ok = bool(given) and hmac.compare_digest(
-            hash_password(given.decode("utf-8", "replace"), salt), expected
-        )
+        ok = await verify(given)
         if not ok:
             guard.failed(ip)
             log(f"{ip}: 비밀번호 틀림")
