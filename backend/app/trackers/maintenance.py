@@ -17,7 +17,8 @@ import hashlib
 import logging
 import re
 import time
-from dataclasses import dataclass
+from collections.abc import Callable
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -40,6 +41,7 @@ from app.domain.tasks.service import (
 from app.domain.tasks.values import TaskStatus
 from app.persistence.db import get_sessionmaker
 from app.persistence.models import ActivitySession, Task
+from app.trackers.remote_2325 import Remote, RemoteError, tunnel_up
 
 log = logging.getLogger(__name__)
 
@@ -302,19 +304,100 @@ async def run(items: list[MaintItem], now: datetime | None = None) -> MaintStats
     return stats
 
 
-async def run_once() -> str | None:
+def remote_items(
+    remote: Remote, assignee: str, needs_detail: Callable[[MaintItem], bool]
+) -> list[MaintItem]:
+    """터널이 닫혔을 때 서버 맥 2325 API 로 같은 건을 읽는다.
+
+    목록에는 피드백 앞부분만 있다. 동기화하거나 제목을 다시 맞출 건(needs_detail)만 상세를 읽어
+    전체 피드백과 접수 시각을 채운다. 담당 건이 900개가 넘어 건마다 상세를 부르지 않는다.
+    휴지통으로 간 건은 목록에 없어 빠진다.
+    """
+    mine = remote.my_item_keys(assignee)
+    stages = remote.stages()
+    items: list[MaintItem] = []
+    for row in remote.items():
+        key = row["id"]
+        if key not in mine:
+            continue
+        item = MaintItem(
+            item_key=key,
+            human_id=row.get("display_id") or "",
+            company=row.get("company") or "",
+            feedback=row.get("detail_preview") or "",
+            status_group=row.get("status_group") or "",
+            received_at=None,
+            stage=stages.get(key),
+        )
+        if needs_detail(item):
+            detail = remote.item(key)
+            if detail is None:
+                continue
+            item = replace(
+                item,
+                human_id=detail.get("human_id") or item.human_id,
+                company=detail.get("company") or item.company,
+                feedback=detail.get("feedback") or "",
+                received_at=detail["received_at"],
+            )
+        items.append(item)
+    return items
+
+
+async def _needs_detail() -> Callable[[MaintItem], bool]:
+    """run이 동기화할 건(2325 상태가 바뀜)과 refresh_texts가 볼 건(열린 일)."""
     settings = get_settings()
-    try:
-        items = await asyncio.to_thread(
+    async with get_sessionmaker()() as session:
+        rows = await session.execute(
+            select(ActivitySession.external_id, ActivitySession.summary).where(
+                ActivitySession.owner_id == settings.owner_id, ActivitySession.source == SOURCE
+            )
+        )
+        synced = {external_id: summary for external_id, summary in rows.all()}
+        open_refs = set(
+            await session.scalars(
+                select(Task.request_id).where(
+                    Task.owner_id == settings.owner_id,
+                    Task.source == SOURCE,
+                    Task.status.not_in(("done", "cancelled")),
+                )
+            )
+        )
+    return lambda item: (
+        synced.get(item.item_key) != item.state_key or f"{SOURCE}:{item.item_key}" in open_refs
+    )
+
+
+async def load_items() -> list[MaintItem]:
+    """터널이 열려 있으면 DB, 닫혀 있으면 서버 맥 2325 API."""
+    settings = get_settings()
+    if tunnel_up(settings.maint_db_port):
+        return await asyncio.to_thread(
             fetch_items,
             settings.maint_env_file,
             settings.maint_assignee_name,
             settings.maint_db_port,
         )
+    needs_detail = await _needs_detail()
+
+    def fetch() -> list[MaintItem]:
+        with Remote(settings.maint_remote_session_file, settings.maint_remote_url) as remote:
+            return remote_items(remote, settings.maint_assignee_name, needs_detail)
+
+    log.info("2325 tunnel closed; reading the server mac 2325 API")
+    return await asyncio.to_thread(fetch)
+
+
+async def run_once() -> str | None:
+    try:
+        items = await load_items()
     except (pymysql.err.OperationalError, KeyError, FileNotFoundError) as exc:
         # 전용 터널이 끊겨 있으면 이번 주기는 건너뛴다. 다음 주기에 다시 본다.
         log.warning("2325 tracker skipped: %s", exc)
         return f"2325 DB 연결 실패: {type(exc).__name__}"
+    except RemoteError as exc:
+        log.warning("2325 tracker skipped: %s", exc)
+        return f"2325 터널이 닫혀 있고 서버 맥도 실패: {exc}"[:200]
     stats = await run(items)
     refreshed = await refresh_texts(items)
     log.info(

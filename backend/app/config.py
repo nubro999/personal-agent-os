@@ -23,6 +23,10 @@ class Settings(BaseSettings):
     maint_db_port: int = 13316
     maint_env_file: Path = Path("~/glab/glab_mt/maintenance_list/.env")
     maint_assignee_name: str = "신형섭"
+    # 터널 포트가 닫혀 있으면 서버 맥 2325 웹 API 로 읽는다(app/trackers/remote_2325.py).
+    # 세션은 2325-remote 스킬의 r2325.py login 이 남긴다. 주소를 비우면 세션에 적힌 주소를 쓴다.
+    maint_remote_session_file: Path = Path("~/.config/genlab-2325/session.json")
+    maint_remote_url: str | None = None
     # 처음 가져올 때 이 기간 안에 접수된 열린 건만 Task로 만든다.
     maint_lookback_days: int = 30
     # Slack. 내 계정 user token이라 내 채널, DM, 그룹 DM이 보인다. 쓰기 API는 부르지 않는다.
@@ -64,6 +68,7 @@ class Settings(BaseSettings):
         "auto_cs_dir",
         "claude_projects_dir",
         "maint_env_file",
+        "maint_remote_session_file",
         "slack_token_file",
         "briefing_dir",
         mode="after",

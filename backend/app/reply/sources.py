@@ -24,6 +24,7 @@ from dotenv import dotenv_values
 from app.config import get_settings
 from app.ontology import auto_cs
 from app.trackers.maintenance import connect
+from app.trackers.remote_2325 import Remote, tunnel_up, when
 
 KST = ZoneInfo("Asia/Seoul")
 CHANNEL = "유지보수-고객성공팀"
@@ -128,11 +129,20 @@ def pick_run(
     return max(with_diagnosis, key=rank)
 
 
-def load_case(cs: str, until: datetime | None = None) -> Case:
-    """until(한국 시각)이 있으면 그 전에 나온 실행, 판정, 반영만 본다."""
+@dataclass
+class CaseRows:
+    """건 하나를 재구성할 2325 행. DB 에서 읽든 서버 맥 API 에서 읽든 모양이 같다."""
+
+    item: dict[str, Any]
+    runs: list[dict[str, Any]]  # run_id, agent, ran_at, has_diagnosis
+    reviews: list[dict[str, Any]]  # run_id, axis, verdict, comment, reviewed_at
+    promotions: list[dict[str, Any]]  # run_id, action, status, requested_at
+    outputs: dict[str, dict[str, str]]  # run_id -> {diagnosis, plan}
+
+
+def _db_case_rows(cs: str) -> CaseRows:
     settings = get_settings()
     conn = connect(dotenv_values(settings.maint_env_file), settings.maint_db_port)
-    limit = until.replace(tzinfo=None) if until else datetime.max
     try:
         cur = _cursor(conn)
         cur.execute(
@@ -150,47 +160,114 @@ def load_case(cs: str, until: datetime | None = None) -> Case:
             "FROM rnd_run r WHERE item_key = %s",
             (key,),
         )
-        runs = [r for r in cur.fetchall() if r["ran_at"] and r["ran_at"] < limit]
+        runs = list(cur.fetchall())
         cur.execute(
             "SELECT v.run_id, axis, verdict, comment, reviewed_at FROM rnd_review v "
             "JOIN rnd_run r ON r.run_id = v.run_id WHERE r.item_key = %s",
             (key,),
         )
-        reviews = [v for v in cur.fetchall() if v["reviewed_at"] and v["reviewed_at"] < limit]
+        reviews = list(cur.fetchall())
         cur.execute(
             "SELECT run_id, action, status, requested_at FROM rnd_promotion WHERE item_key = %s",
             (key,),
         )
-        promotions = [p for p in cur.fetchall() if p["requested_at"] and p["requested_at"] < limit]
-        chosen = pick_run(runs, reviews, promotions)
-        result = None
-        if chosen:
-            cur.execute(
-                "SELECT part, body FROM rnd_output WHERE run_id = %s "
-                "AND part IN ('diagnosis', 'plan')",
-                (chosen["run_id"],),
-            )
-            parts = {row["part"]: row["body"] or "" for row in cur.fetchall()}
-            result = AgentResult(
-                run_id=chosen["run_id"],
-                agent=chosen["agent"],
-                ran_at=str(chosen["ran_at"]),
-                diagnosis=section(parts.get("diagnosis", ""), "", "\n요청과 판정", DIAGNOSIS_LIMIT),
-                plan=section(parts.get("plan", ""), "수정 방향", "\n고칠 것", PLAN_LIMIT),
-                reviews=[
-                    f"{v['axis']} {v['verdict']}" + (f": {v['comment']}" if v["comment"] else "")
-                    for v in reviews
-                    if v["run_id"] == chosen["run_id"]
-                ],
-                applied=_applied(promotions, chosen["run_id"]),
-            )
+        promotions = list(cur.fetchall())
+        cur.execute(
+            "SELECT o.run_id, o.part, o.body FROM rnd_output o "
+            "JOIN rnd_run r ON r.run_id = o.run_id "
+            "WHERE r.item_key = %s AND o.part IN ('diagnosis', 'plan')",
+            (key,),
+        )
+        outputs: dict[str, dict[str, str]] = {}
+        for row in cur.fetchall():
+            outputs.setdefault(row["run_id"], {})[row["part"]] = row["body"] or ""
     finally:
         conn.close()
+    return CaseRows(item, runs, reviews, promotions, outputs)
+
+
+def remote_case_rows(remote: Remote, cs: str) -> CaseRows:
+    """_db_case_rows와 같은 행을 서버 맥 2325 API 로. 실행마다 상세를 한 번씩 부른다."""
+    item = remote.item_by_cs(cs)
+    if item is None:
+        raise ValueError(f"2325에 없는 건: {cs}")
+    item = item | {"feedback": (item.get("feedback") or "")[:FEEDBACK_LIMIT]}
+    runs: list[dict[str, Any]] = []
+    reviews: list[dict[str, Any]] = []
+    promotions: list[dict[str, Any]] = []
+    outputs: dict[str, dict[str, str]] = {}
+    for row in remote.runs(item["item_key"]):
+        run_id = row["run_id"]
+        detail = remote.run(run_id) or {}
+        parts = detail.get("outputs") or {}
+        runs.append(
+            {
+                "run_id": run_id,
+                "agent": row.get("agent") or "",
+                "ran_at": row["ran_at"],
+                "has_diagnosis": "diagnosis" in parts,
+            }
+        )
+        outputs[run_id] = {
+            part: parts[part] or "" for part in ("diagnosis", "plan") if part in parts
+        }
+        for axis, review in (detail.get("reviews") or {}).items():
+            if review:
+                reviews.append(
+                    {
+                        "run_id": run_id,
+                        "axis": review.get("axis") or axis,
+                        "verdict": review.get("verdict"),
+                        "comment": review.get("comment"),
+                        "reviewed_at": when(review.get("reviewed_at")),
+                    }
+                )
+        promotions += remote.promotions(run_id)
+    return CaseRows(item, runs, reviews, promotions, outputs)
+
+
+def load_case(cs: str, until: datetime | None = None) -> Case:
+    """until(한국 시각)이 있으면 그 전에 나온 실행, 판정, 반영만 본다.
+
+    2325 DB 터널이 닫혀 있으면 서버 맥 2325 API 로 같은 행을 읽는다.
+    """
+    settings = get_settings()
+    if tunnel_up(settings.maint_db_port):
+        rows = _db_case_rows(cs)
+    else:
+        with Remote(settings.maint_remote_session_file, settings.maint_remote_url) as remote:
+            rows = remote_case_rows(remote, cs)
+    return build_case(cs, rows, until)
+
+
+def build_case(cs: str, rows: CaseRows, until: datetime | None = None) -> Case:
+    limit = until.replace(tzinfo=None) if until else datetime.max
+    item = rows.item
+    runs = [r for r in rows.runs if r["ran_at"] and r["ran_at"] < limit]
+    reviews = [v for v in rows.reviews if v["reviewed_at"] and v["reviewed_at"] < limit]
+    promotions = [p for p in rows.promotions if p["requested_at"] and p["requested_at"] < limit]
+    chosen = pick_run(runs, reviews, promotions)
+    result = None
+    if chosen:
+        parts = rows.outputs.get(chosen["run_id"], {})
+        result = AgentResult(
+            run_id=chosen["run_id"],
+            agent=chosen["agent"],
+            ran_at=str(chosen["ran_at"]),
+            diagnosis=section(parts.get("diagnosis", ""), "", "\n요청과 판정", DIAGNOSIS_LIMIT),
+            plan=section(parts.get("plan", ""), "수정 방향", "\n고칠 것", PLAN_LIMIT),
+            reviews=[
+                f"{v['axis']} {v['verdict']}" + (f": {v['comment']}" if v["comment"] else "")
+                for v in reviews
+                if v["run_id"] == chosen["run_id"]
+            ],
+            applied=_applied(promotions, chosen["run_id"]),
+        )
     received = item["received_at"]
     received_kst = received.replace(tzinfo=ZoneInfo("UTC")).astimezone(KST) if received else None
     return Case(
         cs=cs,
-        item_key=key,
+        item_key=item["item_key"],
         brand=item["db_name"] or "",
         company=item["company"] or "",
         received_at=received_kst.strftime("%Y-%m-%d %H:%M") if received_kst else "",

@@ -8,7 +8,8 @@
 에이전트를 돌리지 않고 case_reply_default("수정완료했습니다")를 띄운다.
 
 실행 하나에 초안 하나다. 그 실행 뒤에 내가 카드 스레드에 이미 답했으면 쓰지 않는다. 본 실행은
-activity_sessions(source=case_reply)에 남겨 다시 보지 않는다. 같은 스레드에 누가 나를 불러 만든
+activity_sessions(source=case_reply)에 남겨 다시 보지 않는다. 카드가 아직 안 섰으면 남기지 않고
+다음 실행에서 다시 찾는다. 같은 스레드에 누가 나를 불러 만든
 초안이 이미 있으면 그것을 둔다.
 
 실행: uv run python -m app.trackers.case_replies
@@ -33,6 +34,7 @@ from app.persistence.db import get_sessionmaker
 from app.persistence.models import ActivitySession, ReplyDraft, Task
 from app.trackers import slack
 from app.trackers.maintenance import connect
+from app.trackers.remote_2325 import Remote, tunnel_up
 
 log = logging.getLogger(__name__)
 
@@ -59,6 +61,9 @@ def latest_runs(item_keys: list[str]) -> dict[str, AgentRun]:
     if not item_keys:
         return {}
     settings = get_settings()
+    if not tunnel_up(settings.maint_db_port):
+        with Remote(settings.maint_remote_session_file, settings.maint_remote_url) as remote:
+            return remote_latest_runs(remote, item_keys)
     conn = connect(dotenv_values(settings.maint_env_file), settings.maint_db_port)
     try:
         with conn.cursor(pymysql.cursors.DictCursor) as cur:
@@ -84,6 +89,29 @@ def latest_runs(item_keys: list[str]) -> dict[str, AgentRun]:
     }
 
 
+def remote_latest_runs(remote: Remote, item_keys: list[str]) -> dict[str, AgentRun]:
+    """latest_runs와 같은 값을 서버 맥 2325 API 로. 늦은 실행부터 보고 진단이 있으면 멈춘다."""
+    found: dict[str, AgentRun] = {}
+    for key in item_keys:
+        runs = sorted(
+            (r for r in remote.runs(key) if r["ran_at"]), key=lambda r: r["ran_at"], reverse=True
+        )
+        for agent_run in runs:
+            detail = remote.run(agent_run["run_id"])
+            if not detail or "diagnosis" not in (detail.get("outputs") or {}):
+                continue
+            item = remote.item(key) or {}
+            found[key] = AgentRun(
+                key,
+                item.get("human_id") or "",
+                item.get("db_name") or "",
+                agent_run["run_id"],
+                agent_run["ran_at"],
+            )
+            break
+    return found
+
+
 def card_thread(cs: str) -> tuple[str, str] | None:
     """(채널, 스레드 ts). 팀이 바뀌면 카드가 다시 서므로 마지막 카드다."""
     from app.reply import sources
@@ -98,6 +126,7 @@ class CaseReplyStats:
     candidates: int = 0
     drafted: int = 0
     answered: int = 0
+    no_card: int = 0
 
 
 Writer = Callable[[str], Awaitable[Any]]
@@ -164,7 +193,8 @@ async def run(
             continue
         place = await asyncio.to_thread(card, agent_run.cs)
         if place is None:
-            await _mark(owner_id, agent_run.run_id, "카드 없음")
+            # 카드는 접수 뒤 몇 건씩 묶여 늦게 선다. 기록하지 않고 다음 실행에서 다시 찾는다.
+            stats.no_card += 1
             continue
         channel, thread_ts = place
         thread = slack.analyze_thread(
@@ -231,10 +261,11 @@ async def run_once() -> str | None:
     finally:
         await client.aclose()
     log.info(
-        "case reply tracker: candidates=%d drafted=%d answered=%d",
+        "case reply tracker: candidates=%d drafted=%d answered=%d no_card=%d",
         stats.candidates,
         stats.drafted,
         stats.answered,
+        stats.no_card,
     )
     return None
 

@@ -124,6 +124,22 @@ async def test_drafts_once_for_my_fixing_cases_with_a_result(owner: str) -> None
     assert (again.candidates, writer.cases) == (0, ["CS-A"])
 
 
+async def test_waits_for_a_card_that_is_not_up_yet(owner: str) -> None:
+    await _seed(owner, "A")
+    client = FakeSlack([msg(1.0, "BOT", "Hdex (CS-A)")])
+    writer = Writer()
+
+    def no_card(cs: str) -> None:
+        return None
+
+    stats = await case_replies.run(client, runs=runs_for("A"), card=no_card, writer=writer)
+    assert (stats.no_card, stats.drafted, writer.cases) == (1, 0, [])
+
+    # 카드가 나중에 서면 같은 실행으로 초안을 쓴다.
+    later = await case_replies.run(client, runs=runs_for("A"), card=card, writer=writer)
+    assert (later.drafted, writer.cases) == (1, ["CS-A"])
+
+
 async def test_skips_when_i_already_answered_after_the_run(owner: str) -> None:
     await _seed(owner, "A")
     client = FakeSlack([msg(1.0, "BOT", "Hdex (CS-A)"), msg(RAN_TS + 60, ME, "수정하였습니다")])
