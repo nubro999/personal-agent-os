@@ -69,6 +69,8 @@ JUDGE_TURNS = 3
 REQUEST_LIMIT = 4000
 VERDICTS = ("맞음", "대체로 맞음", "일부", "틀림")
 VERDICT_HEAD = "## 진단 판정"
+# 에이전트 진단을 그대로 옮긴 수정 기록의 머리. 사람이 적은 기록이 아니다.
+AGENT_FIX = "[에이전트"
 AGENT_HEAD = "## 에이전트 결과"
 TRUTH_HEAD = "## 실제로 한 일"
 CASE_LINE = re.compile(r"^- 건: `(case:[^`]+)`", re.MULTILINE)
@@ -677,27 +679,62 @@ def real_runs(data: dict[str, Any], hidden: set[str]) -> dict[str, str]:
     }
 
 
-def diagnosis_bodies(run_ids: list[str]) -> list[tuple[str, str]]:
-    """(실행 id, 진단 본문)을 실행 시각 순으로. 빌드에는 240자만 있어 2325에서 다시 읽는다."""
-    if not run_ids:
+def hidden_truths(reviews: dict[str, str], fix_ids: list[int]) -> list[tuple[str, str, str]]:
+    """(기준 id, 제목, 본문). 숨긴 진단 본문(실행 시각 순)과 사람이 적은 수정 기록.
+
+    빌드에는 글이 240자만 있어 2325에서 다시 읽는다. 에이전트 진단을 옮겨 적은 수정 기록은
+    진단과 같으므로 뺀다. 진단이 X인 건은 사람 수정 기록이 정답이다.
+    """
+    if not reviews and not fix_ids:
         return []
     settings = get_settings()
     conn = connect(dotenv_values(settings.maint_env_file), settings.maint_db_port)
     try:
         with conn.cursor(pymysql.cursors.DictCursor) as cur:
             cur.execute("SET SESSION TRANSACTION READ ONLY")
-            marks = ",".join(["%s"] * len(run_ids))
-            cur.execute(
-                f"""SELECT o.run_id, LEFT(o.body, {JUDGE_LIMIT}) AS body
-                    FROM rnd_output o JOIN rnd_run r ON r.run_id = o.run_id
-                    WHERE o.part = 'diagnosis' AND o.run_id IN ({marks})
-                    ORDER BY r.ran_at, o.run_id""",
-                run_ids,
-            )
-            rows = list(cur.fetchall())
+            runs: list[dict[str, Any]] = []
+            if reviews:
+                marks = ",".join(["%s"] * len(reviews))
+                cur.execute(
+                    f"""SELECT o.run_id, LEFT(o.body, {JUDGE_LIMIT}) AS body
+                        FROM rnd_output o JOIN rnd_run r ON r.run_id = o.run_id
+                        WHERE o.part = 'diagnosis' AND o.run_id IN ({marks})
+                        ORDER BY r.ran_at, o.run_id""",
+                    sorted(reviews),
+                )
+                runs = list(cur.fetchall())
+            fixes: list[dict[str, Any]] = []
+            if fix_ids:
+                marks = ",".join(["%s"] * len(fix_ids))
+                cur.execute(
+                    f"""SELECT id, author, date, LEFT(misresponse_cause, {JUDGE_LIMIT}) AS cause,
+                        LEFT(revision_process, {JUDGE_LIMIT}) AS process
+                        FROM maintenance_context WHERE id IN ({marks}) ORDER BY date, id""",
+                    fix_ids,
+                )
+                fixes = list(cur.fetchall())
     finally:
         conn.close()
-    return [(row["run_id"], row["body"] or "") for row in rows]
+    truths = [
+        (
+            row["run_id"],
+            f"실제 진단 {row['run_id']} (판정: {reviews.get(row['run_id']) or '없음'})",
+            row["body"] or "",
+        )
+        for row in runs
+    ]
+    for row in fixes:
+        cause, process = (row["cause"] or "").strip(), (row["process"] or "").strip()
+        if cause.startswith(AGENT_FIX) or not (cause or process):
+            continue
+        truths.append(
+            (
+                f"fix_record:{row['id']}",
+                f"사람 수정 기록 fix_record:{row['id']} ({row['author'] or '-'}, {row['date']})",
+                f"오응대 원인: {cause or '(비어 있음)'}\n수정 과정: {process or '(비어 있음)'}",
+            )
+        )
+    return truths
 
 
 def agent_section(report_text: str) -> str:
@@ -710,10 +747,10 @@ def agent_section(report_text: str) -> str:
 
 
 def judge_prompt(request: str, truths: list[tuple[str, str, str]], agent_text: str) -> str:
-    """truths: (실행 id, 사람 판정, 진단 본문)."""
+    """truths: (기준 id, 제목, 본문)."""
     parts = ["## 건 원문", "", request[:REQUEST_LIMIT], ""]
-    for run_id, review, body in truths:
-        parts += [f"## 실제 진단 {run_id} (판정: {review or '없음'})", "", body, ""]
+    for _, title, body in truths:
+        parts += [f"## {title}", "", body, ""]
     parts += ["## 시험 에이전트 결과", "", agent_text, ""]
     parts.append("시험 에이전트의 진단을 실제 진단과 대조해 판정을 형식에 맞춰 내.")
     return "\n".join(parts)
@@ -745,14 +782,14 @@ async def judge(
 async def judge_case(
     data: dict[str, Any], case_id: str, report_text: str
 ) -> tuple[Verdict | None, list[str]]:
-    """(판정, 기준으로 쓴 실행 id). 숨긴 진단이 없으면 판정하지 않는다."""
+    """(판정, 기준으로 쓴 진단과 수정 기록 id). 숨긴 진단도 수정 기록도 없으면 판정하지 않는다."""
     hidden, _ = hidden_for(data, case_id)
     reviews = real_runs(data, hidden)
-    bodies = await asyncio.to_thread(diagnosis_bodies, sorted(reviews))
-    truths = [(run_id, reviews[run_id], body) for run_id, body in bodies]
+    fix_ids = sorted(int(n.split(":", 1)[1]) for n in hidden if n.startswith("fix_record:"))
+    truths = await asyncio.to_thread(hidden_truths, reviews, fix_ids)
     case = next(n for n in data["nodes"] if n["id"] == case_id)
     verdict = await judge(case.get("detail") or "", truths, agent_section(report_text))
-    return verdict, [run_id for run_id, _, _ in truths]
+    return verdict, [key for key, _, _ in truths]
 
 
 def verdict_block(verdict: Verdict | None, runs: list[str]) -> str:

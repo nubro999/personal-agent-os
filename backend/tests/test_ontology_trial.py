@@ -208,7 +208,8 @@ def test_judge_sees_the_hidden_diagnosis_and_agent_result_but_not_the_truth_sect
     )
     agent = agent_section(report_text)
     assert agent == "**진단:** 설명이 가로챔"
-    prompt = judge_prompt("요청 원문", [("a", "diagnosis O", "결론: 설명이 가로챘다")], agent)
+    truths = [("a", "실제 진단 a (판정: diagnosis O)", "결론: 설명이 가로챘다")]
+    prompt = judge_prompt("요청 원문", truths, agent)
     assert "## 실제 진단 a (판정: diagnosis O)" in prompt
     assert "설명이 가로챔" in prompt and "맞힘" not in prompt
 
