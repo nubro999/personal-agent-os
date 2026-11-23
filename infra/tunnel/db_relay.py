@@ -420,6 +420,9 @@ def cmd_check(args: argparse.Namespace) -> None:
 async def connect(args: argparse.Namespace) -> None:
     record = load_client()
     mac, pin, password = record["mac"], record["fingerprint"], record["password"]
+    if args.mac:
+        # 같은 서버 맥의 다른 중계(예: S3 읽기 13398). 인증서와 비밀번호는 같다.
+        mac = args.mac if ":" in args.mac else f"{split_addr(mac)[0]}:{args.mac}"
 
     async def handle(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
         try:
@@ -510,6 +513,7 @@ def main() -> None:
 
     p = sub.add_parser("connect", help="이 PC: 로컬 포트 열기")
     p.add_argument("--listen", action="append", help="기본 127.0.0.1:13306, 127.0.0.1:13316")
+    p.add_argument("--mac", help="짝 지은 주소 대신 붙을 곳. 포트만 주면 짝 지은 서버 맥의 그 포트(예: 13398)")
 
     args = parser.parse_args()
     try:
