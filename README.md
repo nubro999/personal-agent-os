@@ -2,7 +2,7 @@
 
 개인 개발·운영 업무를 자연어로 관리하고, 필요한 회사 맥락을 조회하며, 검증된 자동화 작업을 승인 후 실행하는 개인 AI 업무 시스템.
 
-> 상태: **개인용 동작 중** (2026-10-30). http://localhost:8000 에서 보드와 채팅을 쓴다. 2325 담당 건, Slack 멘션과 DM, Claude Code 세션 기록을 30분마다 읽어 Task로 맞추고, 낮 12시에 브리핑 알림을 띄운다. 진행 상황은 [구현 계획](docs/IMPLEMENTATION_PLAN.md)을 본다.
+> 상태: **개인용 동작 중** (2026-10-30). http://localhost:8000 에서 보드와 채팅을 쓴다. 2325 담당 건, Slack 멘션과 DM, Claude Code 세션 기록을 10분마다 읽어 Task로 맞추고, 낮 12시에 브리핑 알림을 띄운다. 진행 상황은 [구현 계획](docs/IMPLEMENTATION_PLAN.md)을 본다.
 
 ## 결정된 방향
 
@@ -74,7 +74,7 @@ infra/systemd/install.sh   # 아래 서비스와 타이머 전부 등록
 - `pao-2325-relay`: 이 PC 의 AWS 키가 막혔을 때 터널 대신 켠다. 서버 맥의 DB 터널을 비밀번호와 TLS 로 빌려
   127.0.0.1:13306, 13316 에 연다(`infra/tunnel/db_relay.py`). 짝을 지으면(`db_relay.py pair`) `install.sh`가
   터널 대신 이것을 켠다. 서버 맥 쪽은 같은 파일을 옮겨 `set-password`, `install-launchd`를 한 번 한다.
-- `pao-tracker.timer`: 30분마다 2325, Slack, Claude Code, 정리. 결과는 `tracker_runs`에 남고 실패는 브리핑에 나온다.
+- `pao-tracker.timer`: 10분마다 2325, Slack, Claude Code, 정리. 결과는 `tracker_runs`에 남고 실패는 브리핑에 나온다.
 - `pao-briefing.timer`: 낮 12시 브리핑 (`~/.local/state/personal-agent-os/briefings/`, Windows 알림). 시각을 바꾸려면 유닛의 `OnCalendar`를 고친다.
 - `pao-backup.timer`: 새벽 3시 `pg_dump`를 `Documents/personal-agent-os-backups`로, 14일 보관.
 - Postgres는 docker `restart: unless-stopped`로 WSL이 켜지면 같이 뜬다.

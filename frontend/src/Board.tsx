@@ -30,6 +30,8 @@ const STATUS: Record<string, string> = {
 const REFRESH_MS = 60_000;
 const REWRITE_POLL_MS = 5_000;
 const TRACKER_POLL_MS = 4_000;
+// 건 회신을 에이전트 초안 대신 이 한 줄로 보내고 싶을 때 고른다.
+const DONE_LINE = "수정완료했습니다";
 const NO_PROJECT = "프로젝트 없음";
 
 type TabId = "reply" | "suggested" | "in_progress" | "blocked" | "todo";
@@ -373,6 +375,12 @@ function DraftPanel({
           label={copied ? "복사했어요" : "복사"}
           onClick={() => void navigator.clipboard.writeText(text).then(() => setCopied(true))}
         />
+        {draft.origin === "case" && text.trim() !== DONE_LINE && (
+          <Action label={DONE_LINE} onClick={() => setText(DONE_LINE)} />
+        )}
+        {draft.origin === "case" && text !== draft.draft && (
+          <Action label="에이전트 초안으로" onClick={() => setText(draft.draft)} />
+        )}
         <span className="flex-1" />
         <Action label="버리기" onClick={() => act(() => dismissDraft(draft))} />
       </div>

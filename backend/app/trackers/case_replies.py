@@ -4,8 +4,7 @@
 - 보드의 2325 일이 진행 중이다. 나에게 할당됐고 2325에서 수정 중이다(끝남, 고객 답 대기가 아님).
 - 진단이 있는 에이전트 실행이 있다.
 
-브랜드(2325 db_name)가 case_reply_brands(hdex, mommycare)면 회신 에이전트가 쓴다. 다른 브랜드는
-에이전트를 돌리지 않고 case_reply_default("수정완료했습니다")를 띄운다.
+브랜드를 가리지 않고 회신 에이전트가 쓴다. 「수정완료했습니다」로 보낼지는 보드에서 초안마다 고른다.
 
 실행 하나에 초안 하나다. 그 실행 뒤에 내가 카드 스레드에 이미 답했으면 쓰지 않는다. 본 실행은
 activity_sessions(source=case_reply)에 남겨 다시 보지 않는다. 카드가 아직 안 섰으면 남기지 않고
@@ -187,9 +186,8 @@ async def run(
     stats.candidates = len(todo)
     written = 0
     for agent_run in todo:
-        by_agent = agent_run.brand in settings.case_reply_brands
-        # 에이전트로 쓰는 건만 한 번에 몇 개로 묶는다. 기본 문구는 바로 띄운다.
-        if by_agent and written >= settings.case_reply_limit:
+        # 건마다 에이전트가 오래 걸리므로 한 번에 몇 개로 묶는다. 남은 건은 다음 실행에서 쓴다.
+        if written >= settings.case_reply_limit:
             continue
         place = await asyncio.to_thread(card, agent_run.cs)
         if place is None:
@@ -215,18 +213,14 @@ async def run(
         if existing is not None:
             await _mark(owner_id, agent_run.run_id, "초안 있음")
             continue
-        if by_agent:
-            result = await writer(agent_run.cs)
-            written += 1
-            if result is None:
-                # 다음 실행에서 다시 쓴다.
-                log.warning("case reply %s: no draft", agent_run.cs)
-                continue
-            text = slack.LEADING_MENTION.sub("", result.draft).strip()
-            notes = list(result.check)
-        else:
-            text = settings.case_reply_default
-            notes = ["기본 문구예요. 실제로 반영했는지 확인하고 보내세요."]
+        result = await writer(agent_run.cs)
+        written += 1
+        if result is None:
+            # 다음 실행에서 다시 쓴다.
+            log.warning("case reply %s: no draft", agent_run.cs)
+            continue
+        text = slack.LEADING_MENTION.sub("", result.draft).strip()
+        notes = list(result.check)
         async with get_sessionmaker().begin() as session:
             await slack.save_draft(
                 session,

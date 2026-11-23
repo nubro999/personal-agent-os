@@ -43,7 +43,7 @@ AGENTS.md의 "First delivery"를 순서대로 쪼갠 것. 구현 순서는 DB sc
 - 완료나 취소가 되면 남아 있던 완료 제안은 accepted로 정리한다.
 
 ## Claude Code 수집기 (2026-10-30)
-- `app/trackers/claude_code.py`, systemd `pao-tracker.timer` 30분마다.
+- `app/trackers/claude_code.py`, systemd `pao-tracker.timer` 10분마다.
 - 사람이 쓴 세션만(`entrypoint`가 claude-desktop, cli). sdk 세션은 건너뛴다. 에이전트 자신의 Agent SDK 호출은 `--no-session-persistence`로 세션 파일을 남기지 않는다.
 - 읽은 위치는 `activity_sessions.processed_lines`. LLM이 실패하면 위치를 올리지 않아 다음 실행에서 다시 본다.
 - 처음 실행은 최근 24시간(`PAO_TRACKER_LOOKBACK_HOURS`), 활동 뒤 20분 조용한 세션만(`PAO_TRACKER_IDLE_MINUTES`).

@@ -41,12 +41,9 @@ class Settings(BaseSettings):
     slack_cs_channel: str = "C0A1CV8572S"
     # 건 카드 스레드에서 나를 부른 사람이 없을 때 멘션할 고객사 소통 담당자
     slack_cs_contact: str = "U0AMDBKA1T6"
-    # 에이전트 결과가 나오면 부르지 않아도 회신 초안을 미리 쓰는 브랜드(2325 db_name)
-    case_reply_brands: tuple[str, ...] = ("hdex", "mommycare")
+    # 에이전트 결과가 나오면 브랜드를 가리지 않고 회신 초안을 미리 쓴다.
     # 수집기 한 번에 미리 쓰는 초안 수. 건마다 Agent SDK로 30초~2분 걸린다.
     case_reply_limit: int = 3
-    # 다른 브랜드는 에이전트를 돌리지 않고 이 문구를 미리 띄운다
-    case_reply_default: str = "수정완료했습니다"
     # 한 번 실행에 만드는 답변 초안 수. Claude 호출 수를 묶어 둔다.
     slack_draft_limit: int = 5
     briefing_dir: Path = Path("~/.local/state/personal-agent-os/briefings")

@@ -169,7 +169,7 @@ async def test_case_draft_survives_the_sweep_and_sends_to_the_contact(owner: str
     assert after.status == "used"
 
 
-async def test_other_brands_get_the_default_line_without_the_agent(owner: str) -> None:
+async def test_every_brand_gets_an_agent_draft(owner: str) -> None:
     await _seed(owner, "A")
     client = FakeSlack([msg(1.0, "BOT", "쿤달 (CS-A)")])
     writer = Writer()
@@ -178,6 +178,6 @@ async def test_other_brands_get_the_default_line_without_the_agent(owner: str) -
         client, runs=runs_for("A", brand="kundalKR"), card=card, writer=writer
     )
 
-    assert (stats.drafted, writer.cases) == (1, [])
+    assert (stats.drafted, writer.cases) == (1, ["CS-A"])
     [draft] = await _drafts(owner)
-    assert (draft.draft, draft.origin) == ("수정완료했습니다", "case")
+    assert (draft.draft, draft.origin) == ("사유는 이렇습니다.", "case")
